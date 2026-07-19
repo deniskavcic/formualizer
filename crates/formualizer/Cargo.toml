@@ -56,6 +56,9 @@ portable-wasm = ["eval", "workbook", "sheetport", "parse", "common"]
 # and ambient wall-clock time for date/time builtins.
 wasm-js = ["portable-wasm", "system-clock", "js-runtime"]
 
+# 32-bit row packing via formualizer-common (non-Excel grid sizes).
+wide-rows = ["formualizer-common/wide-rows"]
+
 [dependencies]
 formualizer-common = { path = "../formualizer-common", version = "2.0.0", optional = true }
 formualizer-parse = { path = "../formualizer-parse", version = "2.0.0", optional = true }

@@ -14,6 +14,8 @@ categories = ["data-structures"]
 [features]
 default = []
 serde = ["dep:serde"]
+# 32-bit row packing (full u32 range) instead of Excel's 20-bit row limit.
+wide-rows = []
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }

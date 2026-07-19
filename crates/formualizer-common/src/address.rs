@@ -15,18 +15,21 @@ pub type SheetId = u16;
 /// dependency attribution, UI invalidation, FFI).
 ///
 /// Bit layout (low → high):
-/// - `row0`: 20 bits (0..=1_048_575)
+/// - `row0`: 20 bits (0..=1_048_575) by default; 32 bits with `wide-rows`
 /// - `col0`: 14 bits (0..=16_383)
 /// - `sheet_id`: 16 bits
 ///
 /// This packing is a public contract. Do not change the bit layout without a major
-/// version bump.
+/// version bump (or an explicit Cargo feature such as `wide-rows`).
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackedSheetCell(u64);
 
 impl PackedSheetCell {
+    #[cfg(not(feature = "wide-rows"))]
     const ROW_BITS: u32 = 20;
+    #[cfg(feature = "wide-rows")]
+    const ROW_BITS: u32 = 32;
     const COL_BITS: u32 = 14;
     const SHEET_BITS: u32 = 16;
 
