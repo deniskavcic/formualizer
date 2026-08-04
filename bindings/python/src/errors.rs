@@ -4,6 +4,7 @@ use formualizer::common::error::{
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+#[cfg(not(target_os = "emscripten"))]
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 // Create custom exception types
@@ -45,6 +46,10 @@ fn error_extra_to_py(py: Python<'_>, extra: &ExcelErrorExtra) -> Option<PyObject
         ExcelErrorExtra::PreparationStale { reason } => {
             let _ = dict.set_item("preparation_stale_reason", reason.as_str());
         }
+        ExcelErrorExtra::PlanStale { reason } => {
+            let _ = dict.set_item("plan_stale_reason", reason.as_str());
+        }
+        _ => return None,
     }
     Some(dict.into_any().unbind())
 }
@@ -85,6 +90,9 @@ pub(crate) fn excel_error_to_pyerr(error: RustExcelError) -> PyErr {
         if let ExcelErrorExtra::PreparationStale { reason } = &error.extra {
             let _ = value.setattr("preparation_stale_reason", reason.as_str());
         }
+        if let ExcelErrorExtra::PlanStale { reason } = &error.extra {
+            let _ = value.setattr("plan_stale_reason", reason.as_str());
+        }
     });
     pyerr
 }
@@ -120,14 +128,18 @@ impl ParserError {
 }
 
 /// Python representation of Excel domain errors
-#[gen_stub_pyclass]
-#[pyclass(name = "ExcelError", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(
+    name = "ExcelError",
+    module = "formualizer.formualizer_py",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyExcelError {
     pub(crate) inner: RustExcelError,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyExcelError {
     /// Create a new Excel error
@@ -327,6 +339,7 @@ impl PyExcelError {
             ExcelErrorKind::Cancelled => "#CANCELLED!".to_string(),
             ExcelErrorKind::Error => "#ERROR!".to_string(),
             ExcelErrorKind::NImpl => "#N/IMPL!".to_string(),
+            _ => self.inner.kind.to_string(),
         }
     }
 }

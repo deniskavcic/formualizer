@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use formualizer_common::{ExcelErrorExtra, LiteralValue, RangeAddress, ResourceExhaustionReason};
@@ -12,8 +12,8 @@ use crate::engine::{
     FormulaReplayCoordinateDisposition, FormulaReplayDisposition, OpaquePreparePolicy,
     OpaqueReason, PartitionLegacyMember, PartitionLegacyMemberKind, PartitionReconciliation,
     PartitionedSourceFormulaFamily, PlacementDomainTransport, PreparationOutcome, PrepareScope,
-    PrepareTargetsOptions, SourceCoord, SourceFamilyId, SourceFamilyMembers, SourceFormulaFamily,
-    SourceFormulaOrder, SourceRect, TableSelection,
+    SourceCoord, SourceFamilyId, SourceFamilyMembers, SourceFormulaFamily, SourceFormulaOrder,
+    SourceRect, TableSelection, TargetEvalOptions,
 };
 use crate::reference::{CellRef, Coord, RangeRef};
 use crate::test_workbook::TestWorkbook;
@@ -350,7 +350,7 @@ fn package_fallback_opaque_3d_reference_widens_and_matches_prepare_all_error() {
 
 #[test]
 fn strict_opaque_policy_is_preserved_for_package_fallback_and_authoritative_compatibility() {
-    let strict = PrepareTargetsOptions {
+    let strict = TargetEvalOptions {
         opaque_policy: OpaquePreparePolicy::Error,
         ..Default::default()
     };
@@ -1100,7 +1100,7 @@ fn authoritative_direct_package_does_not_charge_hypothetical_legacy_materializat
     let report = engine
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 2)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&budgets),
                 ..Default::default()
             },
@@ -1126,7 +1126,7 @@ fn direct_heavy_package_honors_target_work_budget_and_remains_staged() {
     let error = engine
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 2)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&budgets),
                 ..Default::default()
             },
@@ -1270,36 +1270,118 @@ fn every_staged_storage_mutation_moves_index_revision_and_keeps_exact_parity() {
 fn provider_revision_change_at_final_validation_is_stale_and_atomic() {
     use std::sync::atomic::Ordering;
 
-    let workbook = TestWorkbook::default();
-    let revision = workbook.planning_revision_handle();
-    let config = EvalConfig {
-        defer_graph_building: true,
-        ..EvalConfig::default()
-    };
-    let mut engine = Engine::new(workbook, config);
-    engine.add_sheet("Outputs").unwrap();
-    engine.stage_formula_text("Outputs", 1, 1, "=1".into());
-    let before = engine.baseline_stats();
-    let bump = revision.clone();
-    engine.set_before_target_preparation_commit_hook(move || {
-        bump.fetch_add(1, Ordering::AcqRel);
-    });
+    for mode in [
+        FormulaPlaneMode::Off,
+        FormulaPlaneMode::Shadow,
+        FormulaPlaneMode::AuthoritativeExperimental,
+    ] {
+        let workbook = TestWorkbook::default();
+        let revision = workbook.planning_revision_handle();
+        let config = EvalConfig {
+            defer_graph_building: true,
+            formula_plane_mode: mode,
+            ..EvalConfig::default()
+        };
+        let mut engine = Engine::new(workbook, config);
+        engine.add_sheet("Outputs").unwrap();
+        engine.stage_formula_text("Outputs", 1, 1, "=1".into());
+        let before = engine.baseline_stats();
+        let before_index_revision = engine.staged_formula_index_revision_for_test();
+        let report_before = engine.last_formula_ingest_report().cloned();
+        let total_before = engine.formula_ingest_report_total().clone();
+        let recalc_before = engine.recalc_epoch;
+        let bump = revision.clone();
+        engine.set_before_target_preparation_commit_hook(move || {
+            bump.fetch_add(1, Ordering::AcqRel);
+        });
 
-    let error = engine
-        .prepare_graph_for_targets(&[cell("Outputs", 1, 1)], Default::default())
-        .unwrap_err();
-    assert!(matches!(
-        error.extra,
-        ExcelErrorExtra::PreparationStale {
-            reason: formualizer_common::PreparationStaleReason::Provider
-        }
-    ));
-    assert_eq!(
-        engine.baseline_stats().graph_vertex_count,
-        before.graph_vertex_count
-    );
-    assert_eq!(engine.staged_formula_count(), 1);
-    assert!(engine.staged_formula_index_is_consistent_for_test());
+        let error = engine
+            .prepare_graph_for_targets(&[cell("Outputs", 1, 1)], Default::default())
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.extra,
+                ExcelErrorExtra::PreparationStale {
+                    reason: formualizer_common::PreparationStaleReason::Provider
+                }
+            ),
+            "{mode:?}: {error:?}"
+        );
+        assert_eq!(
+            engine.baseline_stats().graph_vertex_count,
+            before.graph_vertex_count,
+            "{mode:?}"
+        );
+        let after = engine.baseline_stats();
+        assert_eq!(after.graph_edge_count, before.graph_edge_count, "{mode:?}");
+        assert_eq!(
+            after.formula_plane_active_span_count, before.formula_plane_active_span_count,
+            "{mode:?}"
+        );
+        assert_eq!(engine.staged_formula_count(), 1, "{mode:?}");
+        assert_eq!(
+            engine.staged_formula_index_revision_for_test(),
+            before_index_revision,
+            "{mode:?}"
+        );
+        assert!(engine.formula_parse_diagnostics().is_empty(), "{mode:?}");
+        assert_eq!(engine.last_formula_ingest_report(), report_before.as_ref());
+        assert_eq!(engine.formula_ingest_report_total(), &total_before);
+        assert_eq!(engine.recalc_epoch, recalc_before, "{mode:?}");
+        assert!(engine.staged_formula_index_is_consistent_for_test());
+    }
+}
+
+#[test]
+fn authoritative_compatibility_final_validation_faults_are_atomic() {
+    for seam in [
+        TargetPreparationFault::FinalRevisionValidation,
+        TargetPreparationFault::FinalGraphValidation,
+    ] {
+        let mut engine = engine(FormulaPlaneMode::AuthoritativeExperimental);
+        engine
+            .set_cell_value("Inputs", 3, 3, LiteralValue::Number(7.0))
+            .unwrap();
+        engine.stage_formula_text("Outputs", 1, 1, "=Inputs!A1+1".into());
+        engine.stage_formula_text("Inputs", 1, 1, "=1".into());
+        let before = engine.baseline_stats();
+        let before_revision = engine.staged_formula_index_revision_for_test();
+        let report_before = engine.last_formula_ingest_report().cloned();
+        let total_before = engine.formula_ingest_report_total().clone();
+        let recalc_before = engine.recalc_epoch;
+        let value_before = engine.get_cell_value("Inputs", 3, 3);
+
+        engine.set_target_preparation_fault_for_test(seam);
+        assert!(
+            engine
+                .prepare_graph_for_targets(&[cell("Outputs", 1, 1)], Default::default())
+                .is_err(),
+            "{seam:?}"
+        );
+
+        let after = engine.baseline_stats();
+        assert_eq!(
+            after.graph_vertex_count, before.graph_vertex_count,
+            "{seam:?}"
+        );
+        assert_eq!(after.graph_edge_count, before.graph_edge_count, "{seam:?}");
+        assert_eq!(
+            after.formula_plane_active_span_count, before.formula_plane_active_span_count,
+            "{seam:?}"
+        );
+        assert_eq!(engine.staged_formula_count(), 2, "{seam:?}");
+        assert_eq!(
+            engine.staged_formula_index_revision_for_test(),
+            before_revision,
+            "{seam:?}"
+        );
+        assert!(engine.formula_parse_diagnostics().is_empty(), "{seam:?}");
+        assert_eq!(engine.last_formula_ingest_report(), report_before.as_ref());
+        assert_eq!(engine.formula_ingest_report_total(), &total_before);
+        assert_eq!(engine.recalc_epoch, recalc_before);
+        assert_eq!(engine.get_cell_value("Inputs", 3, 3), value_before);
+        assert!(engine.staged_formula_index_is_consistent_for_test());
+    }
 }
 
 #[test]
@@ -1354,12 +1436,16 @@ fn cancellation_and_all_injected_precommit_seams_preserve_semantic_state() {
 
     let mut cancelled = engine(FormulaPlaneMode::Off);
     cancelled.stage_formula_text("Outputs", 1, 1, "=1".into());
-    let flag = AtomicBool::new(true);
+    let flag = {
+        let token = crate::engine::CancelToken::new();
+        token.cancel();
+        token
+    };
     let error = cancelled
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
-                cancel: Some(&flag),
+            TargetEvalOptions {
+                cancel: Some(flag.clone()),
                 ..Default::default()
             },
         )
@@ -1372,7 +1458,7 @@ fn cancellation_and_all_injected_precommit_seams_preserve_semantic_state() {
     let error = expired
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 deadline: Some(std::time::Instant::now()),
                 ..Default::default()
             },
@@ -1393,7 +1479,7 @@ fn target_admission_boundaries_accept_cap_and_reject_cap_plus_one() {
             EvaluationTarget::Range(RangeAddress::new("Outputs", 1, 1, 1, formula_count).unwrap());
         let result = engine.prepare_graph_for_targets(
             &[target],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&budgets),
                 ..Default::default()
             },
@@ -1446,7 +1532,7 @@ fn target_admission_boundaries_accept_cap_and_reject_cap_plus_one() {
         edge_engine
             .prepare_graph_for_targets(
                 &[cell("Outputs", 1, 1)],
-                PrepareTargetsOptions {
+                TargetEvalOptions {
                     budgets: Some(&edge_cap),
                     ..Default::default()
                 },
@@ -1466,7 +1552,7 @@ fn target_admission_boundaries_accept_cap_and_reject_cap_plus_one() {
     let error = over_edge
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&edge_zero),
                 ..Default::default()
             },
@@ -1513,7 +1599,7 @@ fn graph_source_scratch_zero_cap_and_success_release_to_checkpoint() {
         };
         let result = engine.prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&budgets),
                 ..Default::default()
             },
@@ -1699,7 +1785,7 @@ fn c2_admission_caps_are_typed_and_atomic_for_target_preparation() {
         let error = engine
             .prepare_graph_for_targets(
                 &[cell("Outputs", 1, 1)],
-                PrepareTargetsOptions {
+                TargetEvalOptions {
                     budgets: Some(&budgets),
                     ..Default::default()
                 },
@@ -1831,7 +1917,7 @@ fn widened_staged_lease_scan_charges_and_checkpoints_each_lease() {
     let error = engine
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&budgets),
                 ..Default::default()
             },
@@ -2031,7 +2117,7 @@ fn request_budget_override_restores_engine_and_graph_admission() {
     engine
         .prepare_graph_for_targets(
             &[cell("Outputs", 1, 1)],
-            PrepareTargetsOptions {
+            TargetEvalOptions {
                 budgets: Some(&one),
                 ..Default::default()
             },
@@ -2076,4 +2162,64 @@ fn evaluation_spill_placeholder_creation_obeys_common_admission_atomically() {
         before.graph_vertex_count
     );
     assert_eq!(engine.graph.spill_registry_counts(), (0, 0));
+}
+
+/// One cancellation source covers both phases.
+///
+/// Cancellation used to arrive through two independent channels:
+/// `PrepareTargetsOptions::cancel` was consulted only by the target-preparation
+/// checkpoints, while a separate `cancel_flag` argument drove the evaluation
+/// checkpoints. A caller that supplied only the evaluation flag -- which is what
+/// the old `evaluate_targets_cancellable` wrapper did -- got no cancellation at
+/// any of the preparation checkpoints, the phase that dominates on large
+/// workbooks. A caller that supplied only the options field got no cancellation
+/// during evaluation.
+///
+/// There is now a single token, hoisted onto the engine for the duration of the
+/// call and read by both phases.
+#[test]
+fn one_cancellation_token_covers_preparation_and_evaluation() {
+    let token = crate::engine::CancelToken::new();
+    token.cancel();
+
+    let mut prepared = engine(FormulaPlaneMode::Off);
+    prepared.stage_formula_text("Outputs", 1, 1, "=1".into());
+    let error = prepared
+        .evaluate_targets_with_options(
+            &[cell("Outputs", 1, 1)],
+            TargetEvalOptions {
+                cancel: Some(token.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, formualizer_common::ExcelErrorKind::Cancelled);
+
+    // The same token, through the same field, also reaches preparation-only entry
+    // points; nothing is left to a second parameter that a caller can forget.
+    let mut prepare_only = engine(FormulaPlaneMode::Off);
+    prepare_only.stage_formula_text("Outputs", 1, 1, "=1".into());
+    let error = prepare_only
+        .prepare_graph_for_targets(
+            &[cell("Outputs", 1, 1)],
+            TargetEvalOptions {
+                cancel: Some(token),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, formualizer_common::ExcelErrorKind::Cancelled);
+
+    // An uncancelled token must not disturb a normal run.
+    let mut healthy = engine(FormulaPlaneMode::Off);
+    healthy.stage_formula_text("Outputs", 1, 1, "=1".into());
+    healthy
+        .evaluate_targets_with_options(
+            &[cell("Outputs", 1, 1)],
+            TargetEvalOptions {
+                cancel: Some(crate::engine::CancelToken::new()),
+                ..Default::default()
+            },
+        )
+        .expect("an uncancelled token must not cancel the call");
 }

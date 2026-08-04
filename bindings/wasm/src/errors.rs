@@ -108,6 +108,10 @@ pub(crate) fn excel_error_to_js(error: ExcelError) -> JsValue {
         ExcelErrorExtra::PreparationStale { reason } => {
             set_string(object, "preparation_stale_reason", reason.as_str());
         }
+        ExcelErrorExtra::PlanStale { reason } => {
+            set_string(object, "plan_stale_reason", reason.as_str());
+        }
+        _ => {}
     }
     js_error.into()
 }

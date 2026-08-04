@@ -1360,29 +1360,56 @@ fn deferred_replay_failure_restores_package_and_retry_publishes_once() {
 
 #[test]
 fn deferred_strict_parse_failure_restores_package_without_diagnostics_or_telemetry() {
-    let cfg = EvalConfig {
-        defer_graph_building: true,
-        formula_parse_policy: FormulaParsePolicy::Strict,
-        ..EvalConfig::default()
-    };
-    let mut engine = Engine::new(TestWorkbook::default(), cfg);
-    engine
-        .source_formula_ingress()
-        .stage_deferred(deferred_package("1+", false, false));
-    let before = engine.formula_ingest_report_total().clone();
+    for mode in [
+        FormulaPlaneMode::Off,
+        FormulaPlaneMode::Shadow,
+        FormulaPlaneMode::AuthoritativeExperimental,
+    ] {
+        let cfg = EvalConfig {
+            defer_graph_building: true,
+            formula_parse_policy: FormulaParsePolicy::Strict,
+            formula_plane_mode: mode,
+            ..EvalConfig::default()
+        };
+        let mut engine = Engine::new(TestWorkbook::default(), cfg);
+        engine
+            .source_formula_ingress()
+            .stage_deferred(deferred_package("1+", false, false));
+        let before = engine.formula_ingest_report_total().clone();
 
-    assert!(engine.build_graph_all().is_err());
-    assert_eq!(engine.staged_formula_count(), 1);
-    assert!(engine.formula_parse_diagnostics().is_empty());
-    assert_eq!(engine.formula_ingest_report_total(), &before);
-    assert_eq!(engine.baseline_stats().graph_formula_vertex_count, 0);
+        assert!(engine.build_graph_all().is_err(), "{mode:?}");
+        assert_eq!(engine.staged_formula_count(), 1, "{mode:?}");
+        assert!(engine.formula_parse_diagnostics().is_empty(), "{mode:?}");
+        assert_eq!(engine.formula_ingest_report_total(), &before, "{mode:?}");
+        assert_eq!(
+            engine.baseline_stats().graph_formula_vertex_count,
+            0,
+            "{mode:?}"
+        );
 
-    engine.config.formula_parse_policy = FormulaParsePolicy::AsText;
-    engine.build_graph_all().unwrap();
-    assert_eq!(engine.staged_formula_count(), 0);
-    assert_eq!(engine.formula_parse_diagnostics().len(), 1);
-    assert_eq!(engine.formula_ingest_report_total().source_spool_replays, 1);
-    assert_eq!(engine.baseline_stats().graph_formula_vertex_count, 1);
+        engine.config.formula_parse_policy = FormulaParsePolicy::AsText;
+        engine.build_graph_all().unwrap();
+        assert_eq!(engine.staged_formula_count(), 0, "{mode:?}");
+        assert_eq!(engine.formula_parse_diagnostics().len(), 1, "{mode:?}");
+        assert_eq!(
+            engine.formula_ingest_report_total().source_spool_replays,
+            1,
+            "{mode:?}"
+        );
+        assert_eq!(
+            engine.baseline_stats().graph_formula_vertex_count,
+            1,
+            "{mode:?}"
+        );
+
+        engine.stage_formula_text("Sheet1", 1, 1, "1+".to_string());
+        engine.build_graph_all().unwrap();
+        assert_eq!(
+            engine.formula_parse_diagnostics().len(),
+            2,
+            "{mode:?}: a later successful ingest of the same source is a distinct diagnostic event"
+        );
+    }
 }
 
 #[test]
@@ -2386,6 +2413,78 @@ fn unrelated_semantic_epoch_change_does_not_replay_arithmetic_preparation() {
 }
 
 #[test]
+fn unrelated_commit_boundary_registration_keeps_function_preparation() {
+    struct UnrelatedFunction;
+    impl crate::function::Function for UnrelatedFunction {
+        fn name(&self) -> &'static str {
+            "__UNRELATED_FUNCTION_PREPARATION_CHANGE__"
+        }
+
+        fn eval<'a, 'b, 'c>(
+            &self,
+            _args: &'c [crate::traits::ArgumentHandle<'a, 'b>],
+            _ctx: &dyn crate::traits::FunctionContext<'b>,
+        ) -> Result<crate::traits::CalcValue<'b>, formualizer_common::ExcelError> {
+            Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0)))
+        }
+    }
+
+    crate::builtins::load_builtins();
+    let mut engine = Engine::new(
+        TestWorkbook::default(),
+        EvalConfig::default().with_formula_plane_mode(FormulaPlaneMode::AuthoritativeExperimental),
+    );
+    let family = provider_revision_family(30);
+    let family_id = family.source_id;
+    let preparation = engine
+        .source_formula_ingress()
+        .prepare_families("Sheet1", &[family])
+        .unwrap()
+        .with_exact_replay(
+            Arc::new(std::sync::Mutex::new(Box::new(provider_revision_replay(
+                family_id,
+            )))),
+            BTreeSet::new(),
+        );
+    assert_eq!(preparation.direct_family_count(), 1);
+
+    engine.set_before_prepared_span_commit_hook(|| {
+        crate::function_registry::register_function(Arc::new(UnrelatedFunction));
+        crate::function_registry::register_alias(
+            "",
+            "__UNRELATED_FUNCTION_PREPARATION_ALIAS__",
+            "",
+            "ABS",
+        );
+    });
+    let report = engine
+        .source_formula_ingress()
+        .finish_prepared(vec![(
+            FormulaIngestBatch::new("Sheet1", Vec::new()),
+            FormulaCompressedSourceReport {
+                families_seen: 1,
+                family_cells_seen: 100,
+                ..Default::default()
+            },
+            preparation,
+        )])
+        .unwrap();
+
+    assert_eq!(
+        engine.baseline_stats().formula_plane_active_span_count,
+        1,
+        "{report:?}"
+    );
+    assert_eq!(engine.baseline_stats().graph_formula_vertex_count, 0);
+    assert!(
+        !report
+            .fallback_reasons
+            .contains_key("FunctionSemanticEpochChanged"),
+        "{report:?}"
+    );
+}
+
+#[test]
 fn unrelated_commit_boundary_epoch_change_keeps_arithmetic_preparation() {
     crate::builtins::load_builtins();
     let cfg =
@@ -2536,7 +2635,6 @@ fn semantic_epoch_guard_covers_public_formula_plane_flows() {
         "pub fn prepare_families(",
         "pub fn evaluate_vertex(",
         "pub fn evaluate_until(",
-        "pub fn evaluate_recalc_plan(",
         "pub fn evaluate_all(",
         "pub fn evaluate_all_with_delta(",
         "pub fn evaluate_cells(",
@@ -2557,6 +2655,14 @@ fn semantic_epoch_guard_covers_public_formula_plane_flows() {
             "{signature} bypasses the common semantic epoch guard"
         );
     }
+
+    let plan_start = source.find("pub fn evaluate_recalc_plan(").unwrap();
+    let plan_body = &source[plan_start..source.len().min(plan_start + 1_200)];
+    assert!(plan_body.contains("evaluate_recalc_plan_unobserved"));
+    let executor_start = source.find("fn evaluate_recalc_plan_unobserved(").unwrap();
+    let executor_body = &source[executor_start..source.len().min(executor_start + 1_200)];
+    assert!(executor_body.contains("validate_recalc_plan_key"));
+    assert!(!executor_body.contains("observe_function_semantic_epoch"));
 }
 
 #[test]

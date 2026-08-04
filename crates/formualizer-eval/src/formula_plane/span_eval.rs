@@ -6,13 +6,13 @@
 //! single writeback mechanism.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::arrow_store::{OverlayValue, map_error_code};
+use crate::engine::CancelToken;
 use crate::engine::arena::{AstNodeData, AstNodeId, CompactRefType, DataStore};
 use crate::engine::eval::ComputedWriteBuffer;
 use crate::engine::sheet_registry::SheetRegistry;
@@ -159,6 +159,8 @@ pub(crate) enum ErrorExtraAtom {
     },
     Resource(Box<formualizer_common::ResourceExhaustionDetail>),
     PreparationStale(formualizer_common::PreparationStaleReason),
+    PlanStale(formualizer_common::PlanStaleReason),
+    Other(ExcelErrorExtra),
 }
 
 struct MemoGroup {
@@ -172,7 +174,7 @@ pub(crate) struct SpanEvaluator<'a> {
     current_sheet: &'a str,
     data_store: &'a DataStore,
     sheet_registry: &'a SheetRegistry,
-    cancel: Option<&'a AtomicBool>,
+    cancel: Option<&'a CancelToken>,
 }
 
 impl<'a> SpanEvaluator<'a> {
@@ -199,7 +201,7 @@ impl<'a> SpanEvaluator<'a> {
         current_sheet: &'a str,
         data_store: &'a DataStore,
         sheet_registry: &'a SheetRegistry,
-        cancel: Option<&'a AtomicBool>,
+        cancel: Option<&'a CancelToken>,
     ) -> Self {
         Self {
             plane,
@@ -212,8 +214,7 @@ impl<'a> SpanEvaluator<'a> {
     }
 
     fn cancellation_checkpoint(&self, index: usize) -> Result<(), SpanEvalError> {
-        if index.is_multiple_of(256) && self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if index.is_multiple_of(256) && self.cancel.is_some_and(CancelToken::is_cancelled) {
             Err(SpanEvalError::Cancelled)
         } else {
             Ok(())
@@ -291,7 +292,7 @@ impl<'a> SpanEvaluator<'a> {
                 first_writable_placement.col,
             ));
             let value = match interpreter.evaluate_ast(&ast_tree) {
-                Ok(calc) => literal_to_overlay(calc.into_literal()),
+                Ok(calc) => literal_to_overlay(calc.into_literal(), self.context.date_system()),
                 Err(err) => OverlayValue::Error(map_error_code(err.kind)),
             };
 
@@ -422,7 +423,7 @@ impl<'a> SpanEvaluator<'a> {
                 self.data_store,
                 self.sheet_registry,
             ) {
-                Ok(calc) => literal_to_overlay(calc.into_literal()),
+                Ok(calc) => literal_to_overlay(calc.into_literal(), self.context.date_system()),
                 Err(err) => OverlayValue::Error(map_error_code(err.kind)),
             }
         } else {
@@ -433,7 +434,7 @@ impl<'a> SpanEvaluator<'a> {
                 self.data_store,
                 self.sheet_registry,
             ) {
-                Ok(calc) => literal_to_overlay(calc.into_literal()),
+                Ok(calc) => literal_to_overlay(calc.into_literal(), self.context.date_system()),
                 Err(err) => OverlayValue::Error(map_error_code(err.kind)),
             }
         };
@@ -494,7 +495,7 @@ impl<'a> SpanEvaluator<'a> {
             writable_placements
                 .par_iter()
                 .map(|placement| {
-                    if self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                    if self.cancel.is_some_and(CancelToken::is_cancelled) {
                         return Err(SpanEvalError::Cancelled);
                     }
                     self.evaluate_placement_value(
@@ -706,7 +707,7 @@ impl<'a> SpanEvaluator<'a> {
             self.data_store,
             self.sheet_registry,
         ) {
-            Ok(calc) => literal_to_overlay(calc.into_literal()),
+            Ok(calc) => literal_to_overlay(calc.into_literal(), self.context.date_system()),
             Err(err) => OverlayValue::Error(map_error_code(err.kind)),
         };
         Ok(value)
@@ -911,6 +912,8 @@ fn parameter_atom_from_literal(value: &LiteralValue) -> ParameterAtom {
                 ExcelErrorExtra::PreparationStale { reason } => {
                     ErrorExtraAtom::PreparationStale(*reason)
                 }
+                ExcelErrorExtra::PlanStale { reason } => ErrorExtraAtom::PlanStale(*reason),
+                other => ErrorExtraAtom::Other(other.clone()),
             },
         },
         LiteralValue::Array(rows) => ParameterAtom::Text(Arc::from(format!("{rows:?}"))),
@@ -1090,7 +1093,10 @@ fn validate_relocatable_compact_reference(reference: &CompactRefType) -> Result<
     }
 }
 
-fn literal_to_overlay(value: LiteralValue) -> OverlayValue {
+fn literal_to_overlay(
+    value: LiteralValue,
+    date_system: formualizer_common::DateSystem,
+) -> OverlayValue {
     match value {
         LiteralValue::Int(i) => OverlayValue::Number(i as f64),
         LiteralValue::Number(n) => OverlayValue::Number(n),
@@ -1100,14 +1106,14 @@ fn literal_to_overlay(value: LiteralValue) -> OverlayValue {
             .get_mut(0)
             .and_then(|row| row.get_mut(0))
             .cloned()
-            .map(literal_to_overlay)
+            .map(|value| literal_to_overlay(value, date_system))
             .unwrap_or(OverlayValue::Empty),
         LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => value
-            .as_serial_number()
+            .as_serial_number_for(date_system)
             .map(OverlayValue::DateTime)
             .unwrap_or(OverlayValue::Empty),
         LiteralValue::Duration(_) => value
-            .as_serial_number()
+            .as_serial_number_for(date_system)
             .map(OverlayValue::Duration)
             .unwrap_or(OverlayValue::Empty),
         LiteralValue::Empty => OverlayValue::Empty,
@@ -1135,6 +1141,34 @@ mod tests {
         FormulaOverlayEntryKind, NewFormulaSpan, PlacementDomain, ResultRegion,
     };
     use super::*;
+
+    #[test]
+    fn temporal_overlay_conversion_uses_the_workbook_date_system() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let datetime = date.and_hms_opt(12, 0, 0).unwrap();
+
+        for (system, date_serial, datetime_serial) in [
+            (
+                formualizer_common::DateSystem::Excel1900,
+                45_306.0,
+                45_306.5,
+            ),
+            (
+                formualizer_common::DateSystem::Excel1904,
+                43_844.0,
+                43_844.5,
+            ),
+        ] {
+            assert_eq!(
+                literal_to_overlay(LiteralValue::Date(date), system),
+                OverlayValue::DateTime(date_serial)
+            );
+            assert_eq!(
+                literal_to_overlay(LiteralValue::DateTime(datetime), system),
+                OverlayValue::DateTime(datetime_serial)
+            );
+        }
+    }
 
     fn candidate(
         data_store: &mut DataStore,

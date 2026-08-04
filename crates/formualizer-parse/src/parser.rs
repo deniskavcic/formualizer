@@ -480,7 +480,7 @@ impl ReferenceType {
         }
     }
 
-    /// Create a reference from a string. Can be A1, A:A, A1:B2, Table1[Column], etc.
+    /// Create a reference from a string such as `A1`, `A:A`, `A1:B2`, or `Table1[Column]`.
     pub fn from_string(reference: &str) -> Result<Self, ParsingError> {
         Self::parse_excel_reference(reference)
     }
@@ -2424,9 +2424,24 @@ impl Parser {
         &self.source[span.start..span.end]
     }
 
+    fn semantic_span_value(&self, span: &TokenSpan) -> &str {
+        let value = self.span_value(span);
+        if span.token_type == TokenType::OpInfix
+            && value.as_bytes().contains(&b' ')
+            && value
+                .as_bytes()
+                .iter()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            " "
+        } else {
+            value
+        }
+    }
+
     fn span_to_token(&self, span: &TokenSpan) -> Token {
         Token::new_with_span(
-            self.span_value(span).to_string(),
+            self.semantic_span_value(span).to_string(),
             span.token_type,
             span.subtype,
             span.start,
@@ -2445,7 +2460,7 @@ impl Parser {
         let op = if span.token_type == TokenType::OpPrefix {
             "u"
         } else {
-            self.span_value(span)
+            self.semantic_span_value(span)
         };
 
         match op {

@@ -27,9 +27,9 @@ documentation = "https://docs.rs/formualizer"
 
 [workspace.dependencies]
 
-formualizer-common = { version = "2.0.0", path = "crates/formualizer-common" }
+formualizer-common = { version = "3.0.0", path = "crates/formualizer-common" }
 formualizer-macros = { version = "0.7.1", path = "crates/formualizer-macros" }
-formualizer-parse = { version = "2.0.0", path = "crates/formualizer-parse" }
+formualizer-parse = { version = "3.0.0", path = "crates/formualizer-parse" }
 formualizer-eval = { version = "0.7.1", path = "crates/formualizer-eval" }
 formualizer-workbook = { version = "0.7.1", path = "crates/formualizer-workbook" }
 
@@ -48,7 +48,7 @@ smallvec = "1.13"
 rustc-hash = "1.1"
 tempfile = "3.10"
 web-time = "1.1.0"
-pyo3 = "0.27.1"
+pyo3 = "0.29.0"
 wasm-bindgen = "0.2.95"
 wasm-bindgen-futures = "0.4.45"
 js-sys = "0.3.72"

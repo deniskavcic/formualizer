@@ -135,7 +135,7 @@ pub struct XLookupFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: XLOOKUP(arg1: any@scalar, arg2: range@range, arg3: range@range, arg4?: any@scalar, arg5?: number@scalar, arg6?...: number@scalar)
-/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
 /// Caps: PURE, LOOKUP
 /// [formualizer-docgen:schema:end]
 impl Function for XLookupFn {
@@ -168,7 +168,7 @@ impl Function for XLookupFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -179,7 +179,7 @@ impl Function for XLookupFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -239,11 +239,11 @@ impl Function for XLookupFn {
                 e.clone(),
             )));
         }
-        let lookup_view = match args[1].range_view() {
+        let lookup_view = match args[1].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
-        let ret_view = match args[2].range_view() {
+        let ret_view = match args[2].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -513,7 +513,7 @@ pub struct XMatchFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: XMATCH(arg1: any@scalar, arg2: range@range, arg3?: number@scalar, arg4?...: number@scalar)
-/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
 /// Caps: PURE, LOOKUP
 /// [formualizer-docgen:schema:end]
 impl Function for XMatchFn {
@@ -546,7 +546,7 @@ impl Function for XMatchFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -597,7 +597,7 @@ impl Function for XMatchFn {
                 e.clone(),
             )));
         }
-        let lookup_view = match args[1].range_view() {
+        let lookup_view = match args[1].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -844,7 +844,7 @@ pub struct SortFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: SORT(arg1: range@range, arg2?: number@scalar, arg3?: number@scalar, arg4?...: logical@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg4{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg4{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for SortFn {
@@ -866,7 +866,7 @@ impl Function for SortFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -915,7 +915,7 @@ impl Function for SortFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -1082,7 +1082,7 @@ pub struct SortByFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: SORTBY(arg1: range@range, arg2: range@range, arg3?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for SortByFn {
@@ -1104,7 +1104,7 @@ impl Function for SortByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -1115,7 +1115,7 @@ impl Function for SortByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -1149,7 +1149,7 @@ impl Function for SortByFn {
             )));
         }
 
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -1167,7 +1167,7 @@ impl Function for SortByFn {
 
         while arg_idx < args.len() {
             // by_array
-            let by_view = match args[arg_idx].range_view() {
+            let by_view = match args[arg_idx].range_view_or_scalar() {
                 Ok(v) => v,
                 Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
             };
@@ -1306,7 +1306,7 @@ pub struct RandArrayFn;
 /// Variadic: true
 /// Signature: RANDARRAY(arg1?: number@scalar, arg2?: number@scalar, arg3?: number@scalar, arg4?: number@scalar, arg5?...: logical@scalar)
 /// Arg schema: arg1{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg2{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg5{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}
-/// Caps: none
+/// Caps: VOLATILE
 /// [formualizer-docgen:schema:end]
 impl Function for RandArrayFn {
     fn caps(&self) -> crate::function::FnCaps {
@@ -1684,7 +1684,7 @@ pub struct GroupByFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: GROUPBY(arg1: range@range, arg2: range@range, arg3: any@scalar, arg4?: number@scalar, arg5?: number@scalar, arg6?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for GroupByFn {
@@ -1706,7 +1706,7 @@ impl Function for GroupByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -1717,7 +1717,7 @@ impl Function for GroupByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -1785,11 +1785,11 @@ impl Function for GroupByFn {
         }
 
         // Get row_fields and values ranges
-        let row_fields_view = match args[0].range_view() {
+        let row_fields_view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
-        let values_view = match args[1].range_view() {
+        let values_view = match args[1].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -2058,7 +2058,7 @@ pub struct PivotByFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: PIVOTBY(arg1: range@range, arg2: range@range, arg3: range@range, arg4: any@scalar, arg5?: number@scalar, arg6?: number@scalar, arg7?: number@scalar, arg8?: number@scalar, arg9?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg7{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg8{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg9{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg6{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg7{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg8{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}; arg9{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for PivotByFn {
@@ -2080,7 +2080,7 @@ impl Function for PivotByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2091,7 +2091,7 @@ impl Function for PivotByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2102,7 +2102,7 @@ impl Function for PivotByFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2192,15 +2192,15 @@ impl Function for PivotByFn {
         }
 
         // Get ranges
-        let row_fields_view = match args[0].range_view() {
+        let row_fields_view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
-        let col_fields_view = match args[1].range_view() {
+        let col_fields_view = match args[1].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
-        let values_view = match args[2].range_view() {
+        let values_view = match args[2].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -2529,7 +2529,7 @@ pub struct FilterFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: FILTER(arg1: range@range, arg2: range@range, arg3?...: any@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for FilterFn {
@@ -2551,7 +2551,7 @@ impl Function for FilterFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2559,10 +2559,15 @@ impl Function for FilterFn {
                     default: None,
                 },
                 // include
+                //
+                // Not `by_ref`: in practice this argument is a computed boolean
+                // array (`B2:B5="Jakarta"`) rather than a bare reference, and a
+                // by-ref argument that does not resolve to a reference is
+                // rejected with #REF! during argument preparation.
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2594,8 +2599,8 @@ impl Function for FilterFn {
                 ExcelError::new(ExcelErrorKind::Value),
             )));
         }
-        let array_view = args[0].range_view()?;
-        let include_view = args[1].range_view()?;
+        let array_view = args[0].range_view_or_scalar()?;
+        let include_view = args[1].range_view_or_scalar()?;
 
         let (array_rows, array_cols) = array_view.dims();
         if array_rows == 0 || array_cols == 0 {
@@ -2702,7 +2707,7 @@ pub struct UniqueFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: UNIQUE(arg1: range@range, arg2?: logical@scalar, arg3?...: logical@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}; arg3{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}; arg3{kinds=logical,required=false,shape=scalar,by_ref=false,coercion=Logical,max=None,repeating=None,default=true}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for UniqueFn {
@@ -2723,7 +2728,7 @@ impl Function for UniqueFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -2759,7 +2764,7 @@ impl Function for UniqueFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -3052,7 +3057,7 @@ pub struct TransposeFn;
 /// Max args: 1
 /// Variadic: false
 /// Signature: TRANSPOSE(arg1: range@range)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for TransposeFn {
@@ -3072,7 +3077,7 @@ impl Function for TransposeFn {
             vec![ArgSchema {
                 kinds: smallvec::smallvec![ArgKind::Range],
                 required: true,
-                by_ref: true,
+                by_ref: false,
                 shape: ShapeKind::Range,
                 coercion: CoercionPolicy::None,
                 max: None,
@@ -3087,7 +3092,7 @@ impl Function for TransposeFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -3164,7 +3169,7 @@ pub struct TakeFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: TAKE(arg1: range@range, arg2: number@scalar, arg3?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for TakeFn {
@@ -3185,7 +3190,7 @@ impl Function for TakeFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -3221,7 +3226,7 @@ impl Function for TakeFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -3348,7 +3353,7 @@ pub struct DropFn;
 /// Max args: variadic
 /// Variadic: true
 /// Signature: DROP(arg1: range@range, arg2: number@scalar, arg3?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for DropFn {
@@ -3369,7 +3374,7 @@ impl Function for DropFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Range],
                     required: true,
-                    by_ref: true,
+                    by_ref: false,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -3405,7 +3410,7 @@ impl Function for DropFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
+        let view = match args[0].range_view_or_scalar() {
             Ok(v) => v,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -3948,6 +3953,52 @@ mod tests {
             .unwrap()
             .into_literal();
         assert_eq!(v_empty, LiteralValue::Text("EMPTY".into()));
+    }
+
+    /// `include` is usually a computed boolean array (`B2:B5="Jakarta"`) rather
+    /// than a bare reference. The existing coverage only ever passed a
+    /// reference, so a `by_ref` schema on that argument went unnoticed while
+    /// rejecting every idiomatic call with #REF!.
+    #[test]
+    fn filter_accepts_computed_include() {
+        let wb = TestWorkbook::new()
+            .with_function(Arc::new(FilterFn))
+            .with_cell_a1("Sheet1", "A1", LiteralValue::Int(10))
+            .with_cell_a1("Sheet1", "A2", LiteralValue::Int(20))
+            .with_cell_a1("Sheet1", "A3", LiteralValue::Int(30));
+        let ctx = wb.interpreter();
+        let f = ctx.context.get_function("", "FILTER").unwrap();
+
+        let array_range = range("A1:A3", 1, 1, 3, 1);
+        // {TRUE;FALSE;TRUE} as an inline array rather than a reference
+        let include_array = ASTNode::new(
+            ASTNodeType::Array(vec![
+                vec![lit(LiteralValue::Boolean(true))],
+                vec![lit(LiteralValue::Boolean(false))],
+                vec![lit(LiteralValue::Boolean(true))],
+            ]),
+            None,
+        );
+
+        let v = f
+            .dispatch(
+                &[
+                    ArgumentHandle::new(&array_range, &ctx),
+                    ArgumentHandle::new(&include_array, &ctx),
+                ],
+                &ctx.function_context(None),
+            )
+            .unwrap()
+            .into_literal();
+
+        match v {
+            LiteralValue::Array(a) => {
+                assert_eq!(a.len(), 2, "expected the two included rows, got {a:?}");
+                assert_eq!(a[0], vec![LiteralValue::Number(10.0)]);
+                assert_eq!(a[1], vec![LiteralValue::Number(30.0)]);
+            }
+            other => panic!("expected array got {other:?}"),
+        }
     }
 
     #[test]

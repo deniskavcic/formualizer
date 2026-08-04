@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+#[cfg(not(target_os = "emscripten"))]
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use formualizer::common::LiteralValue;
@@ -108,8 +109,12 @@ impl formualizer::workbook::CustomFnHandler for PyCustomFnHandler {
 ///     )
 ///     wb = fz.Workbook(config=cfg)
 /// ```
-#[gen_stub_pyclass]
-#[pyclass(name = "WorkbookConfig", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(
+    name = "WorkbookConfig",
+    module = "formualizer.formualizer_py",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyWorkbookConfig {
     mode: PyWorkbookMode,
@@ -118,7 +123,7 @@ pub struct PyWorkbookConfig {
     span_evaluation: Option<bool>,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyWorkbookConfig {
     #[new]
@@ -170,8 +175,12 @@ impl PyWorkbookConfig {
 ///     s.set_formula(1, 2, "=PMT(A2/12, A3, -A1)")
 ///     print(wb.evaluate_cell("Sheet1", 1, 2))
 /// ```
-#[gen_stub_pyclass]
-#[pyclass(name = "Workbook", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(
+    name = "Workbook",
+    module = "formualizer.formualizer_py",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyWorkbook {
     inner: std::sync::Arc<std::sync::RwLock<formualizer::workbook::Workbook>>,
@@ -180,7 +189,7 @@ pub struct PyWorkbook {
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyWorkbook {
     #[new]
@@ -410,6 +419,75 @@ impl PyWorkbook {
         let mut sheets = self.sheets.write().unwrap();
         sheets.entry(name.to_string()).or_default();
         Ok(())
+    }
+
+    /// Define a native table over cells that already exist.
+    ///
+    /// `cell_range` is `(first_row, first_col, last_row, last_col)`, 1-based and
+    /// inclusive, covering the header row when `header_row` is true. Tables are
+    /// metadata over existing cells, so populate the region first; structured
+    /// references such as `=SUM(Sales[Amount])` resolve immediately afterwards.
+    ///
+    /// ```python
+    ///     import formualizer as fz
+    ///
+    ///     wb = fz.Workbook()
+    ///     wb.add_sheet("S")
+    ///     wb.set_value("S", 1, 1, "Name")
+    ///     wb.set_value("S", 1, 2, "Score")
+    ///     wb.set_value("S", 2, 1, "Ani")
+    ///     wb.set_value("S", 2, 2, 10)
+    ///     wb.add_table("Scores", "S", (1, 1, 2, 2), ["Name", "Score"])
+    ///     wb.set_formula("S", 4, 2, "=SUM(Scores[Score])")
+    ///     wb.evaluate_all()
+    /// ```
+    #[pyo3(signature = (name, sheet, cell_range, headers, *, header_row = true, totals_row = false))]
+    pub fn add_table(
+        &self,
+        name: &str,
+        sheet: &str,
+        cell_range: (u32, u32, u32, u32),
+        headers: Vec<String>,
+        header_row: bool,
+        totals_row: bool,
+    ) -> PyResult<()> {
+        self.inner
+            .write()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}")))?
+            .define_table(name, sheet, cell_range, headers, header_row, totals_row)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Metadata for every defined table, ordered by name.
+    ///
+    /// Each entry is a dict with `name`, `sheet`, `range` (a 1-based inclusive
+    /// `(first_row, first_col, last_row, last_col)` tuple), `headers`,
+    /// `header_row` and `totals_row`.
+    pub fn tables(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        let wb = self
+            .inner
+            .read()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}")))?;
+        let mut out = Vec::new();
+        for table in wb.tables() {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("name", &table.name)?;
+            dict.set_item("sheet", &table.sheet)?;
+            dict.set_item(
+                "range",
+                (
+                    table.start_row,
+                    table.start_col,
+                    table.end_row,
+                    table.end_col,
+                ),
+            )?;
+            dict.set_item("headers", &table.headers)?;
+            dict.set_item("header_row", table.header_row)?;
+            dict.set_item("totals_row", table.totals_row)?;
+            out.push(dict.into());
+        }
+        Ok(out)
     }
 
     #[getter]
@@ -718,8 +796,10 @@ impl PyWorkbook {
         self.cancel_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        wb.evaluate_all_cancellable(self.cancel_flag.clone())
-            .map_err(workbook_error_to_pyerr)?;
+        wb.evaluate_all_cancellable(formualizer::eval::engine::CancelToken::from_flag(
+            self.cancel_flag.clone(),
+        ))
+        .map_err(workbook_error_to_pyerr)?;
         Ok(())
     }
 
@@ -786,7 +866,10 @@ impl PyWorkbook {
             .collect();
 
         let results = wb
-            .evaluate_cells_cancellable(&refs, self.cancel_flag.clone())
+            .evaluate_cells_cancellable(
+                &refs,
+                formualizer::eval::engine::CancelToken::from_flag(self.cancel_flag.clone()),
+            )
             .map_err(workbook_error_to_pyerr)?;
 
         let py_results = pyo3::types::PyList::empty(py);
@@ -959,8 +1042,15 @@ impl PyWorkbook {
             .inner
             .write()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}")))?;
+        {
+            let mut sheets = self.sheets.write().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}"))
+            })?;
+            sheets.clear();
+        }
         wb.undo()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(())
     }
 
     /// Redo the most recently undone edit.
@@ -969,8 +1059,15 @@ impl PyWorkbook {
             .inner
             .write()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}")))?;
+        {
+            let mut sheets = self.sheets.write().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("lock: {e}"))
+            })?;
+            sheets.clear();
+        }
         wb.redo()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(())
     }
 
     // Batch ops
@@ -1099,6 +1196,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkbookConfig>()?;
     m.add_class::<PyRangeAddress>()?;
     m.add_class::<PyCycleTelemetry>()?;
+    m.add_class::<PyCell>()?;
     Ok(())
 }
 
@@ -1107,8 +1205,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Read-only snapshot of the engine's `CycleTelemetry`, taken by
 /// `Workbook.last_cycle_telemetry()`. Counters reset at the start of every
 /// evaluation request.
-#[gen_stub_pyclass]
-#[pyclass(name = "CycleTelemetry", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(
+    name = "CycleTelemetry",
+    module = "formualizer.formualizer_py",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCycleTelemetry {
     /// SCC tasks executed (static SCCs that reached Runtime evaluation).
@@ -1168,7 +1270,7 @@ impl PyCycleTelemetry {
     }
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyCycleTelemetry {
     fn __repr__(&self) -> String {
@@ -1200,8 +1302,8 @@ pub struct CellData {
     pub formula: Option<String>,
 }
 
-#[gen_stub_pyclass]
-#[pyclass(name = "Cell", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(name = "Cell", module = "formualizer.formualizer_py")]
 pub struct PyCell {
     value: LiteralValue,
     formula: Option<String>,
@@ -1213,7 +1315,7 @@ impl PyCell {
     }
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyCell {
     #[getter]
@@ -1227,8 +1329,12 @@ impl PyCell {
     }
 }
 
-#[gen_stub_pyclass]
-#[pyclass(name = "RangeAddress", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(
+    name = "RangeAddress",
+    module = "formualizer.formualizer_py",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRangeAddress {
     #[pyo3(get)]
@@ -1243,7 +1349,7 @@ pub struct PyRangeAddress {
     pub end_col: u32,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PyRangeAddress {
     #[new]

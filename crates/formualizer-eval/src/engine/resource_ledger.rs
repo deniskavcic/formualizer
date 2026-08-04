@@ -9,6 +9,7 @@ use formualizer_common::{
 use crate::instant::FzInstant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EvaluationIncompleteReason {
     FormulaPlaneTopologyCandidates,
     FormulaPlaneTopologyEdges,
@@ -272,6 +273,7 @@ impl ResourceEnvelope {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LegacyResourceConfigDisposition {
     #[default]
     NotPresent,
@@ -381,6 +383,7 @@ pub(crate) fn resolve_evaluation_budgets(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResourceLedgerError {
     Exhausted(ResourceExhaustionDetail),
     ReleaseUnderflow {
@@ -436,7 +439,13 @@ pub struct ResourceLedgerSnapshot {
 
 type ElapsedClock = Arc<dyn Fn() -> Duration + Send + Sync>;
 
-pub struct ResourceLedger {
+/// Internal accounting mechanism for a single evaluation request.
+///
+/// The budget and snapshot *data* types in this module are public so callers can
+/// configure limits and read outcomes. The ledger itself drives reserve/release
+/// pairing and work charging inside the engine, and publishing that protocol would
+/// freeze an internal contract that no external caller can meaningfully use.
+pub(crate) struct ResourceLedger {
     request_id: Option<u64>,
     budgets: EvaluationBudgets,
     retained_current: u64,

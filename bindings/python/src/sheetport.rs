@@ -17,6 +17,7 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyException, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
+#[cfg(not(target_os = "emscripten"))]
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value as JsonValue;
 
@@ -77,14 +78,14 @@ type RuntimeResult<T> = Result<T, RuntimeSheetPortError>;
 ///     out = session.evaluate_once(freeze_volatile=True)
 ///     print(out["final_price"])
 /// ```
-#[gen_stub_pyclass]
-#[pyclass(name = "SheetPortSession", module = "formualizer")]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pyclass)]
+#[pyclass(name = "SheetPortSession", module = "formualizer.formualizer_py")]
 pub struct PySheetPortSession {
     workbook: PyWorkbook,
     bindings: ManifestBindings,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(not(target_os = "emscripten"), gen_stub_pymethods)]
 #[pymethods]
 impl PySheetPortSession {
     #[classmethod]
@@ -705,6 +706,36 @@ fn map_sheetport_err(py: Python<'_>, err: RuntimeSheetPortError) -> PyErr {
         RuntimeSheetPortError::InvariantViolation { port, message } => {
             SheetPortError::new_err(format!("port `{port}` invariant violation: {message}"))
         }
+        RuntimeSheetPortError::LayoutExhausted {
+            port,
+            sheet,
+            termination,
+            scan_start,
+            limit,
+            observed,
+        } => {
+            let error = SheetPortError::new_err(format!(
+                "layout `{termination}` exhausted for port `{port}` on `{sheet}`"
+            ));
+            let value = error.value(py);
+            let _ = value.setattr("kind", "LayoutExhausted");
+            let _ = value.setattr("port", port);
+            let _ = value.setattr("sheet", sheet);
+            let _ = value.setattr("termination", termination);
+            let _ = value.setattr("scan_start", scan_start);
+            let _ = value.setattr("limit", limit);
+            let _ = value.setattr("observed", observed);
+            error
+        }
+        RuntimeSheetPortError::SelectorSafety { port, reason } => {
+            SheetPortError::new_err(format!("port `{port}` selector safety error: {reason}"))
+        }
+        RuntimeSheetPortError::BatchRestoration {
+            primary,
+            restoration,
+        } => SheetPortError::new_err(format!(
+            "batch failed ({primary}); baseline restoration also failed ({restoration})"
+        )),
     }
 }
 

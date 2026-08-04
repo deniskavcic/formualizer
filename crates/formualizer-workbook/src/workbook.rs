@@ -1,6 +1,5 @@
 use crate::error::IoError;
 use crate::traits::{AdapterLoadStats, LoadStrategy, SpreadsheetReader, SpreadsheetWriter};
-use chrono::Timelike;
 use formualizer_common::{
     LiteralValue, RangeAddress,
     error::{ExcelError, ExcelErrorKind},
@@ -2001,8 +2000,10 @@ impl Workbook {
         use formualizer_eval::arrow_store::ArrowSheet;
 
         if self.engine.sheet_store().sheet(sheet).is_none() {
+            let date_system = self.engine.config.date_system;
             self.engine.sheet_store_mut().sheets.push(ArrowSheet {
                 name: std::sync::Arc::<str>::from(sheet),
+                date_system,
                 columns: Vec::new(),
                 nrows: 0,
                 chunk_starts: Vec::new(),
@@ -2054,21 +2055,15 @@ impl Workbook {
                 }
                 LiteralValue::Date(d) => {
                     let dt = d.and_hms_opt(0, 0, 0).unwrap();
-                    let serial = formualizer_eval::builtins::datetime::datetime_to_serial_for(
-                        date_system,
-                        &dt,
-                    );
+                    let serial = formualizer_common::datetime_to_serial_for(date_system, &dt);
                     OverlayValue::DateTime(serial)
                 }
                 LiteralValue::DateTime(dt) => {
-                    let serial = formualizer_eval::builtins::datetime::datetime_to_serial_for(
-                        date_system,
-                        dt,
-                    );
+                    let serial = formualizer_common::datetime_to_serial_for(date_system, dt);
                     OverlayValue::DateTime(serial)
                 }
                 LiteralValue::Time(t) => {
-                    let serial = t.num_seconds_from_midnight() as f64 / 86_400.0;
+                    let serial = formualizer_common::time_to_fraction(t);
                     OverlayValue::DateTime(serial)
                 }
                 LiteralValue::Duration(d) => {
@@ -2821,7 +2816,7 @@ impl Workbook {
     pub fn prepare_graph_for_targets(
         &mut self,
         targets: &[formualizer_eval::engine::EvaluationTarget],
-        options: formualizer_eval::engine::PrepareTargetsOptions<'_>,
+        options: formualizer_eval::engine::TargetEvalOptions<'_>,
     ) -> Result<formualizer_eval::engine::PreparedTargetGraphReport, IoError> {
         self.engine
             .prepare_graph_for_targets(targets, options)
@@ -2865,6 +2860,33 @@ impl Workbook {
     ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
         self.engine
             .evaluate_targets(targets)
+            .map_err(IoError::Engine)
+    }
+
+    pub fn evaluate_targets_with_options(
+        &mut self,
+        targets: &[formualizer_eval::engine::EvaluationTarget],
+        options: formualizer_eval::engine::TargetEvalOptions<'_>,
+    ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
+        self.engine
+            .evaluate_targets_with_options(targets, options)
+            .map_err(IoError::Engine)
+    }
+
+    pub fn evaluate_targets_cancellable(
+        &mut self,
+        targets: &[formualizer_eval::engine::EvaluationTarget],
+        cancel: formualizer_eval::engine::CancelToken,
+    ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
+        // Cancellation now reaches target *preparation* as well as evaluation.
+        // Previously this passed only the evaluation-side flag, leaving the
+        // preparation checkpoints inert.
+        let options = formualizer_eval::engine::TargetEvalOptions {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
+        self.engine
+            .evaluate_targets_with_options(targets, options)
             .map_err(IoError::Engine)
     }
 
@@ -2912,10 +2934,10 @@ impl Workbook {
     pub fn evaluate_cells_cancellable(
         &mut self,
         targets: &[(&str, u32, u32)],
-        cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        cancel: formualizer_eval::engine::CancelToken,
     ) -> Result<Vec<LiteralValue>, IoError> {
         self.engine
-            .evaluate_cells_cancellable(targets, cancel_flag)
+            .evaluate_cells_cancellable(targets, cancel)
             .map_err(IoError::Engine)
             .map(|values| {
                 values
@@ -3025,15 +3047,34 @@ impl Workbook {
 
     pub fn evaluate_all_cancellable(
         &mut self,
-        cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        cancel: formualizer_eval::engine::CancelToken,
     ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
         self.engine
-            .evaluate_all_cancellable(cancel_flag)
+            .evaluate_all_cancellable(cancel)
             .map_err(IoError::Engine)
     }
 
     pub fn build_recalc_plan(&self) -> Result<formualizer_eval::engine::RecalcPlan, IoError> {
         self.engine.build_recalc_plan().map_err(IoError::Engine)
+    }
+
+    pub fn build_recalc_plan_for_targets(
+        &mut self,
+        targets: &[formualizer_eval::engine::EvaluationTarget],
+    ) -> Result<formualizer_eval::engine::RecalcPlan, IoError> {
+        self.engine
+            .build_recalc_plan_for_targets(targets)
+            .map_err(IoError::Engine)
+    }
+
+    pub fn build_recalc_plan_for_targets_with_options(
+        &mut self,
+        targets: &[formualizer_eval::engine::EvaluationTarget],
+        options: formualizer_eval::engine::TargetEvalOptions<'_>,
+    ) -> Result<formualizer_eval::engine::RecalcPlan, IoError> {
+        self.engine
+            .build_recalc_plan_for_targets_with_options(targets, options)
+            .map_err(IoError::Engine)
     }
 
     pub fn evaluate_with_plan(
@@ -3042,6 +3083,27 @@ impl Workbook {
     ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
         self.engine
             .evaluate_recalc_plan(plan)
+            .map_err(IoError::Engine)
+    }
+
+    pub fn evaluate_with_plan_controls(
+        &mut self,
+        plan: &formualizer_eval::engine::RecalcPlan,
+        cancel: Option<formualizer_eval::engine::CancelToken>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
+        self.engine
+            .evaluate_recalc_plan_with_controls(plan, cancel, deadline)
+            .map_err(IoError::Engine)
+    }
+
+    pub fn evaluate_with_plan_cancellable(
+        &mut self,
+        plan: &formualizer_eval::engine::RecalcPlan,
+        cancel: formualizer_eval::engine::CancelToken,
+    ) -> Result<formualizer_eval::engine::EvalResult, IoError> {
+        self.engine
+            .evaluate_recalc_plan_with_controls(plan, Some(cancel), None)
             .map_err(IoError::Engine)
     }
 
@@ -3113,6 +3175,100 @@ impl Workbook {
                 .delete_name(name, scope)
                 .map_err(IoError::Engine)
         }
+    }
+
+    pub fn has_name(&self, name: &str, scope_sheet: Option<&str>) -> bool {
+        self.engine.has_name(name, scope_sheet)
+    }
+
+    pub fn resolved_name_value(
+        &self,
+        name: &str,
+        scope_sheet: Option<&str>,
+    ) -> Option<LiteralValue> {
+        self.engine.resolved_name_value(name, scope_sheet)
+    }
+
+    /// Define a native table over an existing region.
+    ///
+    /// `range` is `(first_row, first_col, last_row, last_col)`, 1-based and
+    /// inclusive, and covers the header row when `header_row` is true -- the same
+    /// convention as the `tables` entry in the JSON workbook format.
+    ///
+    /// Tables are metadata over cells that already exist, so populate the region
+    /// first with [`Workbook::set_value`] / [`Workbook::set_formula`]. Structured
+    /// references such as `=SUM(Sales[Amount])` resolve immediately afterwards,
+    /// and later edits inside the region propagate to formulas that read it.
+    ///
+    /// Tables do not auto-expand: writing below or beside a table does not grow
+    /// it.
+    pub fn define_table(
+        &mut self,
+        name: &str,
+        sheet: &str,
+        range: (u32, u32, u32, u32),
+        headers: Vec<String>,
+        header_row: bool,
+        totals_row: bool,
+    ) -> Result<(), ExcelError> {
+        let (first_row, first_col, last_row, last_col) = range;
+        let invalid = |message: String| {
+            Err(ExcelError::new(formualizer_common::ExcelErrorKind::Value).with_message(message))
+        };
+        if first_row == 0 || first_col == 0 || last_row == 0 || last_col == 0 {
+            return invalid(
+                "table range is 1-based; rows and columns must be greater than zero".to_string(),
+            );
+        }
+        if first_row > last_row || first_col > last_col {
+            return invalid(format!(
+                "table range ({first_row},{first_col},{last_row},{last_col}) is inverted; \
+                 expected (first_row, first_col, last_row, last_col)"
+            ));
+        }
+        let Some(sheet_id) = self.engine.sheet_id(sheet) else {
+            return Err(ExcelError::new(formualizer_common::ExcelErrorKind::Ref)
+                .with_message(format!("Unknown sheet: {sheet}")));
+        };
+        let width = (last_col - first_col + 1) as usize;
+        if headers.len() != width {
+            return invalid(format!(
+                "table `{name}` spans {width} column(s) but {} header(s) were supplied; \
+                 headers name the table's columns and must match its width",
+                headers.len()
+            ));
+        }
+        if header_row && first_row == last_row {
+            return invalid(format!(
+                "table `{name}` declares a header row but its range is a single row, \
+                 leaving no data rows"
+            ));
+        }
+
+        let start = formualizer_eval::reference::CellRef::new(
+            sheet_id,
+            formualizer_eval::reference::Coord::new(first_row - 1, first_col - 1, true, true),
+        );
+        let end = formualizer_eval::reference::CellRef::new(
+            sheet_id,
+            formualizer_eval::reference::Coord::new(last_row - 1, last_col - 1, true, true),
+        );
+        self.engine.define_table(
+            name,
+            formualizer_eval::reference::RangeRef::new(start, end),
+            header_row,
+            headers,
+            totals_row,
+        )
+    }
+
+    /// Metadata for every defined table, ordered by name.
+    pub fn tables(&self) -> Vec<formualizer_eval::engine::TableMetadata> {
+        self.engine.tables()
+    }
+
+    pub fn table_metadata(&self, name: &str) -> Option<formualizer_eval::engine::TableMetadata> {
+        self.engine.table_metadata(name)
     }
 
     /// Resolve a named range (workbook-scoped or unique sheet-scoped) to an absolute address.

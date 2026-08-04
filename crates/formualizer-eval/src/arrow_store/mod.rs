@@ -1,7 +1,6 @@
 use arrow_array::Array;
 use arrow_array::new_null_array;
 use arrow_schema::DataType;
-use chrono::Timelike;
 use std::sync::Arc;
 
 use arrow_array::builder::{BooleanBuilder, Float64Builder, StringBuilder, UInt8Builder};
@@ -301,6 +300,11 @@ impl ArrowColumn {
 #[derive(Debug, Clone)]
 pub struct ArrowSheet {
     pub name: Arc<str>,
+    /// Serial encoding used by every temporal lane in this sheet.
+    ///
+    /// Changing this value requires re-encoding all temporal cells; engine and
+    /// workbook constructors therefore set it once when the sheet is created.
+    pub date_system: crate::engine::DateSystem,
     pub columns: Vec<ArrowColumn>,
     pub nrows: u32,
     pub chunk_starts: Vec<usize>,
@@ -588,8 +592,7 @@ impl IngestBuilder {
                 // Phase A: coerce temporal to serials in numeric lane with DateTime tag
                 LiteralValue::Date(d) => {
                     let dt = d.and_hms_opt(0, 0, 0).unwrap();
-                    let serial =
-                        crate::builtins::datetime::datetime_to_serial_for(self.date_system, &dt);
+                    let serial = formualizer_common::datetime_to_serial_for(self.date_system, &dt);
                     self.num_builders[c].append_value(serial);
                     self.lane_counts[c].n_num += 1;
                     self.bool_builders[c].append_null();
@@ -597,8 +600,7 @@ impl IngestBuilder {
                     self.err_builders[c].append_null();
                 }
                 LiteralValue::DateTime(dt) => {
-                    let serial =
-                        crate::builtins::datetime::datetime_to_serial_for(self.date_system, dt);
+                    let serial = formualizer_common::datetime_to_serial_for(self.date_system, dt);
                     self.num_builders[c].append_value(serial);
                     self.lane_counts[c].n_num += 1;
                     self.bool_builders[c].append_null();
@@ -606,7 +608,7 @@ impl IngestBuilder {
                     self.err_builders[c].append_null();
                 }
                 LiteralValue::Time(t) => {
-                    let serial = t.num_seconds_from_midnight() as f64 / 86_400.0;
+                    let serial = formualizer_common::time_to_fraction(t);
                     self.num_builders[c].append_value(serial);
                     self.lane_counts[c].n_num += 1;
                     self.bool_builders[c].append_null();
@@ -758,6 +760,7 @@ impl IngestBuilder {
         }
         ArrowSheet {
             name: self.name,
+            date_system: self.date_system,
             columns,
             nrows: self.total_rows,
             chunk_starts,
@@ -781,6 +784,7 @@ pub fn map_error_code(kind: ExcelErrorKind) -> u8 {
         ExcelErrorKind::Calc => 11,
         ExcelErrorKind::Circ => 12,
         ExcelErrorKind::Cancelled => 13,
+        _ => 8,
     }
 }
 
@@ -844,16 +848,13 @@ impl OverlayValue {
             LiteralValue::Error(e) => OverlayValue::Error(map_error_code(e.kind)),
             LiteralValue::Date(d) => {
                 let dt = d.and_hms_opt(0, 0, 0).unwrap();
-                OverlayValue::DateTime(crate::builtins::datetime::datetime_to_serial_for(
-                    date_system,
-                    &dt,
-                ))
+                OverlayValue::DateTime(formualizer_common::datetime_to_serial_for(date_system, &dt))
             }
-            LiteralValue::DateTime(dt) => OverlayValue::DateTime(
-                crate::builtins::datetime::datetime_to_serial_for(date_system, dt),
-            ),
+            LiteralValue::DateTime(dt) => {
+                OverlayValue::DateTime(formualizer_common::datetime_to_serial_for(date_system, dt))
+            }
             LiteralValue::Time(t) => {
-                OverlayValue::DateTime(t.num_seconds_from_midnight() as f64 / 86_400.0)
+                OverlayValue::DateTime(formualizer_common::time_to_fraction(t))
             }
             LiteralValue::Duration(d) => OverlayValue::Duration(d.num_seconds() as f64 / 86_400.0),
             LiteralValue::Pending => OverlayValue::Pending,
@@ -934,11 +935,14 @@ impl OverlayValue {
         }
     }
 
-    pub(crate) fn to_literal(&self) -> LiteralValue {
+    pub(crate) fn to_literal_for(&self, date_system: crate::engine::DateSystem) -> LiteralValue {
         match self {
             OverlayValue::Empty => LiteralValue::Empty,
             OverlayValue::Number(n) => LiteralValue::Number(*n),
-            OverlayValue::DateTime(serial) => LiteralValue::from_serial_number(*serial),
+            OverlayValue::DateTime(serial) => {
+                LiteralValue::try_from_serial_number_for(date_system, *serial)
+                    .unwrap_or_else(LiteralValue::Error)
+            }
             OverlayValue::Duration(serial) => {
                 let nanos_f = *serial * 86_400.0 * 1_000_000_000.0;
                 let nanos = nanos_f.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
@@ -951,6 +955,11 @@ impl OverlayValue {
             }
             OverlayValue::Pending => LiteralValue::Pending,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn to_literal(&self) -> LiteralValue {
+        self.to_literal_for(crate::engine::DateSystem::Excel1900)
     }
 }
 
@@ -1003,8 +1012,13 @@ impl<'a> OverlayScalar<'a> {
         self.as_value().lowered_text_value()
     }
 
+    pub(crate) fn to_literal_for(&self, date_system: crate::engine::DateSystem) -> LiteralValue {
+        self.as_value().to_literal_for(date_system)
+    }
+
+    #[cfg(test)]
     pub(crate) fn to_literal(&self) -> LiteralValue {
-        self.as_value().to_literal()
+        self.to_literal_for(crate::engine::DateSystem::Excel1900)
     }
 }
 
@@ -3347,7 +3361,13 @@ impl ArrowSheet {
     /// Columns start with no materialized chunks; callers can populate only touched
     /// column/chunk pairs via `set_sparse_overlay_value`. Missing chunks remain
     /// observable as empty cells through scalar and range reads.
-    pub fn new_sparse(sheet_name: &str, ncols: usize, nrows: usize, chunk_rows: usize) -> Self {
+    pub fn new_sparse(
+        sheet_name: &str,
+        ncols: usize,
+        nrows: usize,
+        chunk_rows: usize,
+        date_system: crate::engine::DateSystem,
+    ) -> Self {
         let chunk_rows = chunk_rows.max(1);
         let columns = (0..ncols)
             .map(|idx| ArrowColumn {
@@ -3358,6 +3378,7 @@ impl ArrowSheet {
             .collect();
         let mut sheet = Self {
             name: Arc::from(sheet_name.to_string()),
+            date_system,
             columns,
             nrows: 0,
             chunk_starts: Vec::new(),
@@ -3465,7 +3486,7 @@ impl ArrowSheet {
         // Overlay takes precedence: user edits over computed over base.
         let cascade = OverlayCascade::new(&ch.overlay, &ch.computed_overlay);
         if let Some(ov) = cascade.get_scalar(in_off) {
-            return ov.to_literal();
+            return ov.to_literal_for(self.date_system);
         }
 
         // Read tag and route to lane.
@@ -3487,7 +3508,8 @@ impl ArrowSheet {
                     if arr.is_null(in_off) {
                         return LiteralValue::Empty;
                     }
-                    LiteralValue::from_serial_number(arr.value(in_off))
+                    LiteralValue::try_from_serial_number_for(self.date_system, arr.value(in_off))
+                        .unwrap_or_else(LiteralValue::Error)
                 } else {
                     LiteralValue::Empty
                 }
@@ -4630,9 +4652,64 @@ pub struct ColumnShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_error_storage_codes_are_stable() {
+        let cases = [
+            (ExcelErrorKind::Null, 1),
+            (ExcelErrorKind::Ref, 2),
+            (ExcelErrorKind::Name, 3),
+            (ExcelErrorKind::Value, 4),
+            (ExcelErrorKind::Div, 5),
+            (ExcelErrorKind::Na, 6),
+            (ExcelErrorKind::Num, 7),
+            (ExcelErrorKind::Error, 8),
+            (ExcelErrorKind::NImpl, 9),
+            (ExcelErrorKind::Spill, 10),
+            (ExcelErrorKind::Calc, 11),
+            (ExcelErrorKind::Circ, 12),
+            (ExcelErrorKind::Cancelled, 13),
+        ];
+        for (kind, code) in cases {
+            assert_eq!(map_error_code(kind), code, "{kind:?}");
+            assert_eq!(unmap_error_code(code), kind, "code {code}");
+        }
+        assert_eq!(unmap_error_code(u8::MAX), ExcelErrorKind::Error);
+    }
     use arrow_array::Array;
     use arrow_schema::DataType;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
+
+    #[test]
+    fn datetime_lanes_round_trip_the_sheet_date_system() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let datetime = date.and_hms_opt(12, 30, 0).unwrap();
+
+        for system in [
+            crate::engine::DateSystem::Excel1900,
+            crate::engine::DateSystem::Excel1904,
+        ] {
+            let values = vec![LiteralValue::Date(date), LiteralValue::DateTime(datetime)];
+            let mut ingest = IngestBuilder::new("Sheet1", 2, 16, system);
+            ingest.append_row(&values).unwrap();
+            let sheet = ingest.finish();
+
+            assert_eq!(sheet.date_system, system);
+            assert_eq!(sheet.get_cell_value(0, 0), values[0]);
+            assert_eq!(sheet.get_cell_value(0, 1), values[1]);
+            let view = sheet.range_view(0, 0, 0, 1);
+            assert_eq!(view.get_cell(0, 0), values[0]);
+            assert_eq!(view.get_cell(0, 1), values[1]);
+
+            let mut sparse = ArrowSheet::new_sparse("Sparse", 1, 1, 16, system);
+            sparse.set_sparse_overlay_value(
+                0,
+                0,
+                OverlayValue::from_literal_value(&values[1], system),
+            );
+            assert_eq!(sparse.get_cell_value(0, 0), values[1]);
+        }
+    }
 
     fn add_overlay_stats(into: &mut OverlayDebugStats, next: OverlayDebugStats) {
         into.points += next.points;

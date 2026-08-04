@@ -3,6 +3,7 @@
 //! Provides incremental formula evaluation with dependency tracking.
 
 pub mod arrow_ingest;
+pub mod cancel;
 pub(crate) mod convergence;
 pub mod effects;
 pub mod eval;
@@ -50,9 +51,10 @@ pub mod tuning;
 mod tests;
 
 pub use arena::AstNodeId;
+pub use cancel::CancelToken;
 pub use eval::{
     CycleTelemetry, Engine, EngineAction, EngineBaselineStats, EvalResult, RecalcPlan,
-    SourceFormulaIngress, VirtualDepTelemetry,
+    SourceFormulaIngress, TableMetadata, VirtualDepTelemetry,
 };
 pub use eval_delta::{
     DeltaMode, EvalDelta, EvalDeltaCompatibilityPolicy, EvalDeltaRecord, TARGET_EVAL_DELTA_VERSION,
@@ -71,6 +73,8 @@ pub use formula_source::{
     SourceFamilyMembers, SourceFormulaFamily, SourceFormulaOrder, SourceRect,
 };
 pub use journal::{ActionJournal, ArrowOp, ArrowUndoBatch, GraphUndoBatch};
+#[allow(deprecated)]
+pub use target_preparation::PrepareTargetsOptions;
 // Use SoA implementation
 pub use formualizer_common::{ResourceExhaustionDetail, ResourceExhaustionReason};
 pub use graph::snapshot::VertexSnapshot;
@@ -81,22 +85,26 @@ pub use graph::{
 pub use resource_ledger::{
     AdmissionResourceBudget, DeadlineResourceBudget, DiskScratchPolicy, EvaluationBudgets,
     EvaluationIncompleteReason, EvaluationResourceConfigDiagnostic,
-    LegacyResourceConfigDisposition, OptimizationResourceBudget, ResourceEnvelope, ResourceLedger,
+    LegacyResourceConfigDisposition, OptimizationResourceBudget, ResourceEnvelope,
     ResourceLedgerError, ResourceLedgerSnapshot, RetainedResourceBudget, ScratchResourceBudget,
     SemanticResourceBudget, WorkResourceBudget,
 };
+// Internal accounting mechanism: reachable inside the crate, deliberately not
+// part of the published surface. See the type's documentation.
+pub(crate) use resource_ledger::ResourceLedger;
 pub use resource_observability::{
     EvaluationRequestKind, EvaluationRequestOutcome, EvaluationRequestPhaseTimings,
     EvaluationResourceBaselineStats, EvaluationResourceClass, EvaluationResourceLedgerRequestStats,
     EvaluationResourceReason, EvaluationResourceRequestStats, FormulaDirtyLeaseOutcome,
-    FormulaPlaneTopologyCacheOutcome, FormulaPlaneTopologyRequestStats,
-    FormulaPlaneTopologyStrategy,
+    FormulaPlaneRoute, FormulaPlaneRouteEvent, FormulaPlaneRoutePhase,
+    FormulaPlaneRouteTransitionReason, FormulaPlaneTopologyCacheOutcome,
+    FormulaPlaneTopologyRequestStats, FormulaPlaneTopologyStrategy,
 };
 pub use row_visibility::{RowVisibilitySource, VisibilityMaskMode};
 pub use scheduler::{Layer, Schedule, ScheduleUnit, Scheduler};
 pub use target_preparation::{
     EvaluationTarget, OpaquePreparePolicy, OpaqueReason, PreparationOutcome, PreparationRevision,
-    PrepareScope, PrepareTargetsOptions, PreparedTargetGraphReport, RequestId, TableSelection,
+    PrepareScope, PreparedTargetGraphReport, RequestId, TableSelection, TargetEvalOptions,
 };
 pub use vertex::{VertexId, VertexKind};
 

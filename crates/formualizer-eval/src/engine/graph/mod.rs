@@ -1112,11 +1112,7 @@ impl DependencyGraph {
         self.config.sheet_index_mode = mode;
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_evaluation_budgets_for_test(
-        &mut self,
-        budgets: crate::engine::EvaluationBudgets,
-    ) {
+    pub(crate) fn set_evaluation_budgets(&mut self, budgets: crate::engine::EvaluationBudgets) {
         self.config.evaluation_budgets = budgets;
     }
 
@@ -1806,6 +1802,30 @@ impl DependencyGraph {
             .map_or_else(Vec::new, |index| {
                 index.vertices_in_rect(start_row0, end_row0, start_col0, end_col0)
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_sheet_index_query_stats(&self) {
+        for index in self.sheet_indexes.values() {
+            index.reset_query_stats();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sheet_index_query_stats(
+        &self,
+    ) -> crate::engine::sheet_index::SheetIndexQueryStats {
+        self.sheet_indexes.values().fold(
+            crate::engine::sheet_index::SheetIndexQueryStats::default(),
+            |mut total, index| {
+                let stats = index.query_stats();
+                total.coordinate_nodes_visited = total
+                    .coordinate_nodes_visited
+                    .saturating_add(stats.coordinate_nodes_visited);
+                total.values_visited = total.values_visited.saturating_add(stats.values_visited);
+                total
+            },
+        )
     }
 
     /// Set a value in a cell, returns affected vertex IDs
@@ -4265,32 +4285,16 @@ impl DependencyGraph {
         // Get the sheet_id for this vertex
         let sheet_id = self.store.sheet_id(id);
 
-        // If the adjusted AST contains special #REF markers (from structural edits),
-        // treat this as a REF error on the vertex instead of attempting to resolve.
-        // This prevents failures when reference_adjuster injected placeholder refs.
-        let has_ref_marker = ast.get_dependencies().into_iter().any(|r| {
-            matches!(
-                r,
-                ReferenceType::Cell { sheet: Some(s), .. }
-                    | ReferenceType::Range { sheet: Some(s), .. } if s == "#REF"
-            )
-        });
-        if has_ref_marker {
-            // Store the adjusted AST for round-tripping/display, but set value state to #REF!
-            let ast_id = self.data_store.store_ast(&ast, &self.sheet_reg);
-            self.vertex_formulas.insert(id, ast_id);
-            self.mark_as_ref_error(id);
-            self.store.set_kind(id, VertexKind::FormulaScalar);
-            return Ok(());
-        }
+        // Extract dependencies from AST, retaining unresolved names for later linking.
+        let (new_dependencies, new_range_dependencies, _, named_dependencies, unresolved_names) =
+            self.extract_dependencies_with_pending_names(&ast, sheet_id)?;
 
-        // Extract dependencies from AST
-        let (new_dependencies, new_range_dependencies, _, named_dependencies) =
-            self.extract_dependencies(&ast, sheet_id)?;
+        let old_kind = self.store.kind(id);
 
-        // Remove old dependencies first
+        // Remove all links owned by the previous formula.
         self.remove_dependent_edges(id);
         self.detach_vertex_from_names(id);
+        self.clear_pending_name_references(id);
 
         // Store the new formula
         let ast_id = self.data_store.store_ast(&ast, &self.sheet_reg);
@@ -4303,9 +4307,24 @@ impl DependencyGraph {
         if !named_dependencies.is_empty() {
             self.attach_vertex_to_names(id, &named_dependencies);
         }
+        for unresolved_name in &unresolved_names {
+            self.record_pending_name_reference(sheet_id, unresolved_name, id);
+        }
 
-        // Mark as formula vertex
-        self.store.set_kind(id, VertexKind::FormulaScalar);
+        // Formula replacement supersedes any structural error/cache state left when a
+        // deleted dependency marked this vertex before its AST was rewritten.
+        self.ref_error_vertices.remove(&id);
+        self.vertex_values.remove(&id);
+
+        // A structural rewrite must not collapse an existing array formula kind.
+        self.store.set_kind(
+            id,
+            if old_kind == VertexKind::FormulaArray {
+                VertexKind::FormulaArray
+            } else {
+                VertexKind::FormulaScalar
+            },
+        );
 
         Ok(())
     }
