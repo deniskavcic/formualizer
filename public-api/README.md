@@ -24,7 +24,7 @@ The following contracts are deliberately checked elsewhere:
 - WASM/npm uses wasm-bindgen and TypeScript package output.
 - Bench, testkit, and xtask crates are unpublished internal tooling.
 
-The CFFI, Python, and WASM manifests' current publish flags are release-hygiene debt for the final API review. This check does not change them or treat those crates as crates.io surfaces.
+The CFFI, Python, and WASM Cargo packages are deliberately non-publishable. Their contracts are validated through the C header/ABI, generated Python stubs and wheels, and wasm-bindgen/TypeScript/npm artifacts; they remain outside this eight-crate snapshot set and every crates.io release track.
 
 ## Native feature profiles
 
@@ -35,7 +35,7 @@ The CFFI, Python, and WASM manifests' current publish flags are release-hygiene 
 | `formualizer` | `common`, `parse`, `eval`, `workbook`, `sheetport`, `calamine`, `json`, `csv`, `umya`, `tracing`, `tracing_chrome`, `system-clock` | Includes every facade API gate and native I/O/diagnostic surface. Excludes the browser-only `js-runtime` and `wasm-js` profiles; `portable-wasm` is a redundant alias for gates already enabled. |
 | `formualizer-common` | `serde` | Includes the only optional native integration. |
 | `formualizer-parse` | `serde` | Includes serialized AST support. |
-| `formualizer-eval` | `system-clock`, `tracing`, `tracing_chrome`, `perf_instrumentation`, `formula_plane_diagnostics` | Includes native clock and supported diagnostics. Excludes browser-only `js-runtime` and private `benchmark_internal`. |
+| `formualizer-eval` | `system-clock`, `tracing`, `tracing_chrome`, `perf_instrumentation`, `formula_plane_diagnostics` | Includes native clock and supported diagnostics. Excludes browser-only `js-runtime`, private `benchmark_internal`, and private test gate `test-support`. |
 | `formualizer-workbook` | `system-clock`, `json`, `csv`, `calamine`, `umya`, `mmap`, `io_builtins`, `import_range`, `webservice`, `tracing`, `perf_instrumentation`, `compression`, `calamine_integration`, `umya_integration`, `wasm_plugins`, `wasm_runtime_wasmtime` | Includes all native loaders, I/O builtins, diagnostics, compression, and the native Wasmtime plugin runtime. Excludes browser-only `js-runtime` and private `benchmark_internal`. |
 | `formualizer-sheetport` | `system-clock`, `umya` | Includes native clock and workbook adapter APIs. Excludes browser-only `js-runtime` and private `benchmark_internal`. |
 | `sheetport-spec` | none | The crate has no Cargo features. |

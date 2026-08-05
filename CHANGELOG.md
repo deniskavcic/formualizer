@@ -12,7 +12,16 @@ All notable changes to Formualizer will be documented in this file.
 - Reported error/outcome vocabularies (`ExcelErrorKind`, resource and staleness reasons, `ExcelErrorExtra`, common coordinate/address/value errors, `RecoveryAction`, and `ParsingError`) are now non-exhaustive. Downstream output mappings use deliberate future fallbacks, while caller-supplied/core enums remain exhaustive. Serde unknown variants remain a separate wire-compatibility concern. (#257)
 - Restored the inexpensive legacy `formualizer_common::value::{datetime_to_serial, serial_to_datetime}` paths as forwarding reexports; the root and `date_serial` paths remain available. (#257)
 
-- Migrated the remaining public context and range raw-flag signatures to `CancelToken`: `EvaluationContext::cancellation_token()` and `FunctionContext::cancellation_token()` now return `Option<CancelToken>` instead of `Option<Arc<AtomicBool>>`, and `RangeView::with_cancel_token(...)` now accepts `Option<CancelToken>` instead of `Option<Arc<AtomicBool>>`. Context implementers should clone and return the shared handle without allocating; custom functions should retrieve it once before hot loops and periodically poll `is_cancelled()`. To adopt an existing raw flag, use `CancelToken::from_flag(flag)`, for example `Some(CancelToken::from_flag(Arc::clone(&flag)))`. (#233)
+#### Rust product API freeze (#259)
+
+- **FnCaps representation:** `bits`, `from_bits*`, and the `Flags::{Bits,Primitive}` associated representations widen from `u16` to `u32`, because `LOCAL_ENVIRONMENT` and `MAY_SPILL` use bits above 15. Callers persisting or transporting capability bits must use `u32`; inferred integer types generally need no source change.
+- **Checked graph mutations:** `DependencyGraph::add_dependency_edge`, `DependencyGraph::bulk_insert_values`, and `DependencyGraph::set_cell_value_bulk_untracked` now return `Result<(), ExcelError>` instead of `()`. Propagate with `?` or deliberately handle each error; do not discard it.
+- **Checked editor transaction:** `Engine::edit_with_logger` now returns `Result<T, EditorError>` instead of `T`. Propagate or handle validation and rollback failures.
+- **Opaque cancellation:** `Engine::{evaluate_all_cancellable,evaluate_cells_cancellable,evaluate_until_cancellable,cancellation_token}`, `Workbook::{evaluate_all_cancellable,evaluate_cells_cancellable}`, `EvaluationContext::cancellation_token`, `FunctionContext::cancellation_token`, and `RangeView::with_cancel_token` use `CancelToken` rather than released raw `Arc<AtomicBool>` handles. Existing flags migrate with `CancelToken::from_flag(Arc::clone(&flag))`; context implementers should clone the handle, and hot loops should poll `is_cancelled()`. (#233)
+- **Compatibility restoration (A):** The nine `formualizer_eval::builtins::datetime` paths (`create_date_normalized`, `date_to_serial`, `date_to_serial_for`, `datetime_to_serial`, `datetime_to_serial_for`, `serial_to_date`, `serial_to_datetime`, `serial_to_datetime_for`, and `time_to_fraction`), four-argument Excel-1900 `ArrowSheet::new_sparse`, explicit `new_sparse_with_date_system`, and the already-restored common date aliases are available again. The documented typed `#NUM!` hardening remains for 0.7.1 cases that panicked.
+- **Accidental-surface narrowing (B):** Raw `TableEntry` lookup, the graph-only `first_load_assume_new` hint, dynamic-reference collector storage, policy/context variants, raw FormulaPlane tuple construction, concrete builtin implementations, default test support, and transaction prototypes are no longer supported public surface. Migrate direct callers to `TableMetadata`, `Engine::first_load_assume_new`, released reference-adjustment conveniences, opaque FormulaPlane descriptors/accessors, `builtins::load_builtins`, the opt-in `test-support` feature, or the retained production editor APIs as applicable; dynamic-reference collector storage has no supported public replacement.
+- **Extensible outputs (C):** Approved report/output enums and structs are non-exhaustive. Downstream enum matches need `_`; report struct literals are unsupported, while fields on engine-returned values remain readable. Treat `TargetEvalDelta` sheet IDs and FormulaPlane route IDs/epochs as request/session-local telemetry that must not be persisted or replayed; Python and WASM map future SheetPort errors to generic fallbacks.
+- **Package/freeze evidence (D):** CFFI, Python, and WASM Cargo packages are non-publishable on crates.io; use their C library/header, PyPI wheel, and npm channels instead.
 
 ### Added
 
@@ -36,9 +45,12 @@ All notable changes to Formualizer will be documented in this file.
 
 ### Improved
 
+- Narrowed the published eval API to stable table metadata, reference-adjustment conveniences, builtin loading/date compatibility helpers, and opaque Formula Plane descriptors; test-only helpers now require the non-default `test-support` feature. (#259)
 - Upgraded Calamine-backed XLSX loading to Calamine 0.36 and a single-pass value/formula metadata stream, preserving formula-only worksheet dimensions, cached-value semantics, load limits, shared-formula relocation, and malformed-family fallback.
 
 ### Fixed
+
+- Restored the released `formualizer_eval::builtins::datetime` conversion helpers and sparse-sheet constructor compatibility paths, including explicit 1904 date-system handling. The eval decode wrappers retain released 0.7.1 component-clamping and negative-fraction behavior; as an intentional safety deviation, infinities and chrono date/duration overflow now return typed `#NUM!` instead of panicking. (#259)
 
 - CFFI targeted cell evaluation now reports both the targeted graph-preparation error and the distinct full-graph fallback error when both preparation attempts fail.
 - CFFI canonical formula rendering now honors the selected Excel or OpenFormula dialect while retaining canonical Excel output and existing input/output contracts.

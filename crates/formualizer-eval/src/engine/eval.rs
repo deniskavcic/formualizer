@@ -1054,7 +1054,9 @@ pub struct Engine<R> {
     last_formula_plane_span_eval_report: Option<SpanEvalReport>,
     #[cfg(test)]
     evaluation_request_begin_count_for_test: u64,
+    #[cfg(any(test, feature = "test-support"))]
     before_prepared_span_commit_hook: Option<Box<dyn FnOnce() + Send + Sync>>,
+    #[cfg(test)]
     before_target_preparation_commit_hook: Option<Box<dyn FnOnce() + Send + Sync>>,
     #[cfg(test)]
     before_target_planning_snapshot_hook: Option<Box<dyn FnOnce() + Send + Sync>>,
@@ -1638,6 +1640,7 @@ impl Drop for SourceCacheSession {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct EvalResult {
     pub computed_vertices: usize,
     pub cycle_errors: usize,
@@ -1645,6 +1648,7 @@ pub struct EvalResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TableMetadata {
     pub name: String,
     pub sheet: String,
@@ -1662,6 +1666,7 @@ pub struct TableMetadata {
 /// These counters are deliberately observational: collecting them must not mutate engine state or
 /// alter formula evaluation semantics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EngineBaselineStats {
     pub graph_vertex_count: usize,
     pub graph_formula_vertex_count: usize,
@@ -1689,6 +1694,7 @@ pub struct EngineBaselineStats {
 }
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct VirtualDepTelemetry {
     pub candidate_vertices_total: usize,
     pub vdeps_vertices_total: usize,
@@ -1714,6 +1720,7 @@ pub struct VirtualDepTelemetry {
 /// which pays per-schedule costs). Counters reset at the start of every
 /// evaluation request.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct CycleTelemetry {
     /// SCC tasks executed (static SCCs that reached Runtime evaluation).
     pub static_sccs: usize,
@@ -2579,7 +2586,9 @@ where
             last_formula_plane_span_eval_report: None,
             #[cfg(test)]
             evaluation_request_begin_count_for_test: 0,
+            #[cfg(any(test, feature = "test-support"))]
             before_prepared_span_commit_hook: None,
+            #[cfg(test)]
             before_target_preparation_commit_hook: None,
             #[cfg(test)]
             before_target_planning_snapshot_hook: None,
@@ -2717,7 +2726,9 @@ where
             last_formula_plane_span_eval_report: None,
             #[cfg(test)]
             evaluation_request_begin_count_for_test: 0,
+            #[cfg(any(test, feature = "test-support"))]
             before_prepared_span_commit_hook: None,
+            #[cfg(test)]
             before_target_preparation_commit_hook: None,
             #[cfg(test)]
             before_target_planning_snapshot_hook: None,
@@ -5289,6 +5300,7 @@ where
     /// Test-only fault-injection seam. Not part of the supported API; it exists so
     /// integration tests in sibling crates can fail a commit at an exact point.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_before_prepared_span_commit_hook(
         &mut self,
         hook: impl FnOnce() + Send + Sync + 'static,
@@ -5298,6 +5310,7 @@ where
 
     #[doc(hidden)]
     /// Test-only fault-injection seam, matching `set_after_eager_proposal_commit_hook`.
+    #[cfg(test)]
     pub(crate) fn set_before_target_preparation_commit_hook(
         &mut self,
         hook: impl FnOnce() + Send + Sync + 'static,
@@ -7934,6 +7947,7 @@ where
                 );
         }
         loop {
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(hook) = self.before_prepared_span_commit_hook.take() {
                 hook();
             }
@@ -10871,6 +10885,7 @@ where
                 .sum();
             self.formula_parse_diagnostics.truncate(diagnostics_len);
             self.last_formula_ingest_report = report_len;
+            #[cfg(test)]
             if let Some(hook) = self.before_target_preparation_commit_hook.take() {
                 hook();
             }
@@ -11109,6 +11124,7 @@ where
                 1,
             ));
         }
+        #[cfg(test)]
         if let Some(hook) = self.before_target_preparation_commit_hook.take() {
             hook();
         }
