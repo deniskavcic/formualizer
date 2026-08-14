@@ -53,6 +53,33 @@ pub fn to_serial_lenient(value: &LiteralValue, system: DateSystem) -> Result<f64
     }
 }
 
+/// Strict numeric coercion that resolves temporal values in a date system.
+///
+/// Identical to [`to_number_strict`] except that date-bearing literals are
+/// converted to serials using the workbook's date system instead of the
+/// implicit Excel-1900 default. Unlike [`to_serial_lenient`] it does **not**
+/// parse numeric text, so callers that reject text today keep rejecting it.
+///
+/// This is the coercion financial builtins want for arguments Excel treats as
+/// plain numbers on the sheet: a date cell *is* a number there, so a
+/// `Date`/`DateTime`/`Time`/`Duration` literal must become its serial rather
+/// than being dropped or rejected.
+pub(crate) fn to_serial_strict(
+    value: &LiteralValue,
+    system: DateSystem,
+) -> Result<f64, ExcelError> {
+    match value {
+        LiteralValue::Date(_)
+        | LiteralValue::DateTime(_)
+        | LiteralValue::Time(_)
+        | LiteralValue::Duration(_) => value.as_serial_number_for(system).ok_or_else(|| {
+            ExcelError::new(ExcelErrorKind::Value)
+                .with_message("Cannot convert to date/time serial")
+        }),
+        _ => to_number_strict(value),
+    }
+}
+
 /// Context-aware lenient numeric coercion using locale.
 pub fn to_number_lenient_with_locale(
     value: &LiteralValue,
@@ -62,6 +89,37 @@ pub fn to_number_lenient_with_locale(
         LiteralValue::Text(s) => loc.parse_number_invariant(s).ok_or_else(|| {
             ExcelError::new(ExcelErrorKind::Value)
                 .with_message(format!("Cannot convert '{s}' to number"))
+        }),
+        _ => to_number_strict(value),
+    }
+}
+
+/// Numeric coercion for arithmetic operators.
+///
+/// This deliberately extends only the operator boundary: numeric text is
+/// parsed first using the engine's invariant locale, then date/time text is
+/// parsed by `formualizer-common` and encoded in the workbook's date system.
+/// Aggregate arguments, comparisons, criteria, and functions such as `N`
+/// continue to use their existing coercion policies.
+pub(crate) fn to_arithmetic_number_with_locale(
+    value: &LiteralValue,
+    loc: &crate::locale::Locale,
+    system: DateSystem,
+) -> Result<f64, ExcelError> {
+    match value {
+        LiteralValue::Text(s) => loc
+            .parse_number_invariant(s)
+            .or_else(|| formualizer_common::parse_excel_datetime_text_to_serial_for(system, s))
+            .ok_or_else(|| {
+                ExcelError::new(ExcelErrorKind::Value)
+                    .with_message(format!("Cannot convert '{s}' to arithmetic operand"))
+            }),
+        LiteralValue::Date(_)
+        | LiteralValue::DateTime(_)
+        | LiteralValue::Time(_)
+        | LiteralValue::Duration(_) => value.as_serial_number_for(system).ok_or_else(|| {
+            ExcelError::new(ExcelErrorKind::Value)
+                .with_message("Cannot convert date/time to arithmetic operand")
         }),
         _ => to_number_strict(value),
     }

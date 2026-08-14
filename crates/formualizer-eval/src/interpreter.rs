@@ -12,7 +12,54 @@ use std::{borrow::Cow, sync::Arc};
 use crate::engine::arena::ast::SheetKey;
 use crate::engine::arena::{AstNodeData, AstNodeId, CompactRefType, DataStore};
 use crate::engine::sheet_registry::SheetRegistry;
+use crate::engine::used_extent::{
+    ExtentPolicy, OpenRangeBounds, resolve_used_extent_with_fallback,
+};
 use crate::formula_plane::template_canonical::LiteralSlotId;
+
+pub(crate) fn probe_range_dimensions<C: EvaluationContext + ?Sized>(
+    context: &C,
+    current_sheet: &str,
+    reference: &ReferenceType,
+) -> Option<(u32, u32)> {
+    match reference {
+        ReferenceType::Range {
+            sheet,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            ..
+        } => {
+            let sheet_name = sheet.as_deref().unwrap_or(current_sheet);
+            let extent = resolve_used_extent_with_fallback(
+                OpenRangeBounds {
+                    start_row: *start_row,
+                    start_column: *start_col,
+                    end_row: *end_row,
+                    end_column: *end_col,
+                },
+                ExtentPolicy::EvaluationCompat {
+                    fallback_row: None,
+                    fallback_column: None,
+                },
+                || context.sheet_bounds(sheet_name).map(|bounds| bounds.0),
+                || context.sheet_bounds(sheet_name).map(|bounds| bounds.1),
+                |first, last| context.used_rows_for_columns(sheet_name, first, last),
+                |first, last| context.used_cols_for_rows(sheet_name, first, last),
+            );
+            let Some(extent) = extent else {
+                return Some((0, 0));
+            };
+            Some((
+                extent.end_row - extent.start_row + 1,
+                extent.end_column - extent.start_column + 1,
+            ))
+        }
+        ReferenceType::Cell { .. } => Some((1, 1)),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 pub enum LocalBinding {
@@ -257,7 +304,8 @@ impl<'a> Interpreter<'a> {
             | ASTNodeType::UnaryOp { .. }
             | ASTNodeType::BinaryOp { .. }
             | ASTNodeType::Call { .. }
-            | ASTNodeType::Literal(_) => Err(ExcelError::new(ExcelErrorKind::Ref)
+            | ASTNodeType::Literal(_)
+            | ASTNodeType::Omitted => Err(ExcelError::new(ExcelErrorKind::Ref)
                 .with_message("Expression cannot be used as a reference")),
         }
     }
@@ -465,6 +513,7 @@ impl<'a> Interpreter<'a> {
                     data_store.retrieve_value(*vref),
                 ))
             }
+            AstNodeData::Omitted => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0))),
             AstNodeData::Reference { ref_type, .. } => {
                 if self.local_env.is_empty()
                     && let CompactRefType::Cell {
@@ -680,99 +729,8 @@ impl<'a> Interpreter<'a> {
         // Provide the planner with a lightweight range-dimension probe and function lookup
         // so it can select chunked reduction and arg-parallel strategies where appropriate.
         let current_sheet = self.current_sheet.to_string();
-        let range_probe = |reference: &ReferenceType| -> Option<(u32, u32)> {
-            // Mirror Engine::resolve_range_storage bound normalization without materialising
-            use formualizer_parse::parser::ReferenceType as RT;
-            match reference {
-                RT::Range {
-                    sheet,
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                    ..
-                } => {
-                    let sheet_name = sheet.as_deref().unwrap_or(&current_sheet);
-                    // Start with provided values, fill None from used-region or sheet bounds.
-                    let mut sr = *start_row;
-                    let mut sc = *start_col;
-                    let mut er = *end_row;
-                    let mut ec = *end_col;
-
-                    // Column-only: rows are None on both ends
-                    if sr.is_none() && er.is_none() {
-                        // Full-column reference: anchor at row 1 for alignment across columns
-                        let scv = sc.unwrap_or(1);
-                        let ecv = ec.unwrap_or(scv);
-                        sr = Some(1);
-                        if let Some((_, max_r)) =
-                            self.context.used_rows_for_columns(sheet_name, scv, ecv)
-                        {
-                            er = Some(max_r);
-                        } else if let Some((max_rows, _)) = self.context.sheet_bounds(sheet_name) {
-                            er = Some(max_rows);
-                        }
-                    }
-
-                    // Row-only: cols are None on both ends
-                    if sc.is_none() && ec.is_none() {
-                        // Full-row reference: anchor at column 1 for alignment across rows
-                        let srv = sr.unwrap_or(1);
-                        let erv = er.unwrap_or(srv);
-                        sc = Some(1);
-                        if let Some((_, max_c)) =
-                            self.context.used_cols_for_rows(sheet_name, srv, erv)
-                        {
-                            ec = Some(max_c);
-                        } else if let Some((_, max_cols)) = self.context.sheet_bounds(sheet_name) {
-                            ec = Some(max_cols);
-                        }
-                    }
-
-                    // Partially bounded (e.g., A1:A or A:A10)
-                    if sr.is_some() && er.is_none() {
-                        let scv = sc.unwrap_or(1);
-                        let ecv = ec.unwrap_or(scv);
-                        if let Some((_, max_r)) =
-                            self.context.used_rows_for_columns(sheet_name, scv, ecv)
-                        {
-                            er = Some(max_r);
-                        } else if let Some((max_rows, _)) = self.context.sheet_bounds(sheet_name) {
-                            er = Some(max_rows);
-                        }
-                    }
-                    if er.is_some() && sr.is_none() {
-                        // Open start: anchor at row 1
-                        sr = Some(1);
-                    }
-                    if sc.is_some() && ec.is_none() {
-                        let srv = sr.unwrap_or(1);
-                        let erv = er.unwrap_or(srv);
-                        if let Some((_, max_c)) =
-                            self.context.used_cols_for_rows(sheet_name, srv, erv)
-                        {
-                            ec = Some(max_c);
-                        } else if let Some((_, max_cols)) = self.context.sheet_bounds(sheet_name) {
-                            ec = Some(max_cols);
-                        }
-                    }
-                    if ec.is_some() && sc.is_none() {
-                        // Open start: anchor at column 1
-                        sc = Some(1);
-                    }
-
-                    let sr = sr.unwrap_or(1);
-                    let sc = sc.unwrap_or(1);
-                    let er = er.unwrap_or(sr.saturating_sub(1));
-                    let ec = ec.unwrap_or(sc.saturating_sub(1));
-                    if er < sr || ec < sc {
-                        return Some((0, 0));
-                    }
-                    Some((er.saturating_sub(sr) + 1, ec.saturating_sub(sc) + 1))
-                }
-                RT::Cell { .. } => Some((1, 1)),
-                _ => None,
-            }
+        let range_probe = |reference: &ReferenceType| {
+            probe_range_dimensions(self.context, &current_sheet, reference)
         };
         let fn_lookup = |ns: &str, name: &str| self.context.get_function(ns, name);
 
@@ -789,6 +747,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
         match &node.node_type {
             ASTNodeType::Literal(v) => Ok(crate::traits::CalcValue::Scalar(v.clone())),
+            ASTNodeType::Omitted => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0))),
             ASTNodeType::Reference { reference, .. } => self.eval_ast_reference_to_calc(reference),
             ASTNodeType::UnaryOp { op, expr } => self
                 .eval_unary(op, expr)
@@ -810,6 +769,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
         match &node.node_type {
             ASTNodeType::Literal(v) => Ok(crate::traits::CalcValue::Scalar(v.clone())),
+            ASTNodeType::Omitted => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0))),
             ASTNodeType::Reference { reference, .. } => self.eval_ast_reference_to_calc(reference),
             ASTNodeType::UnaryOp { op, expr } => {
                 // For now, reuse existing unary implementation (which recurses).
@@ -1140,7 +1100,11 @@ impl<'a> Interpreter<'a> {
     where
         F: Fn(f64) -> f64,
     {
-        match crate::coercion::to_number_lenient_with_locale(&v, &self.context.locale()) {
+        match crate::coercion::to_arithmetic_number_with_locale(
+            &v,
+            &self.context.locale(),
+            self.context.date_system(),
+        ) {
             Ok(n) => match crate::coercion::sanitize_numeric(f(n)) {
                 Ok(n2) => Ok(LiteralValue::Number(n2)),
                 Err(e) => Ok(LiteralValue::Error(e)),
@@ -1219,9 +1183,23 @@ impl<'a> Interpreter<'a> {
             };
 
             let to_num = |v: &LiteralValue| -> Result<f64, ExcelError> {
-                crate::coercion::to_number_lenient_with_locale(v, &self.context.locale())
+                crate::coercion::to_arithmetic_number_with_locale(
+                    v,
+                    &self.context.locale(),
+                    date_system,
+                )
             };
 
+            // Excel has no date type at the formula level: `date + number` is
+            // plain numeric addition, and the result only *displays* as a date
+            // because the cell inherits a date number format. We keep the
+            // temporal tag when the result is representable, because that is
+            // what lets typed date values survive a round trip, but a serial no
+            // date can represent is still an ordinary number. Erroring there
+            // invents a numeric-domain failure out of arithmetic Excel performs
+            // without complaint -- notably every negative serial, which the
+            // standard `end_date - start_date` accrual idiom produces whenever
+            // the period runs backwards.
             let serial_to_literal = |serial: f64| -> LiteralValue {
                 match crate::coercion::sanitize_numeric(serial) {
                     Ok(serial) => {
@@ -1233,9 +1211,13 @@ impl<'a> Interpreter<'a> {
                                     DateTime(dt)
                                 }
                             }
-                            Err(e) => Error(e),
+                            // Not representable as a date: degrade to the
+                            // plain serial rather than manufacturing #NUM!.
+                            Err(_) => Number(serial),
                         }
                     }
+                    // NaN and infinity are genuine numeric-domain failures and
+                    // keep their error.
                     Err(e) => Error(e),
                 }
             };
@@ -1347,8 +1329,16 @@ impl<'a> Interpreter<'a> {
         F: Fn(f64, f64) -> f64 + Copy,
     {
         self.broadcast_apply(left, right, |l, r| {
-            let a = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let b = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let a = crate::coercion::to_arithmetic_number_with_locale(
+                &l,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
+            let b = crate::coercion::to_arithmetic_number_with_locale(
+                &r,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
             match (a, b) {
                 (Ok(a), Ok(b)) => match crate::coercion::sanitize_numeric(f(a, b)) {
                     Ok(n2) => Ok(LiteralValue::Number(n2)),
@@ -1361,8 +1351,16 @@ impl<'a> Interpreter<'a> {
 
     fn divide(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let rn = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let ln = crate::coercion::to_arithmetic_number_with_locale(
+                &l,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
+            let rn = crate::coercion::to_arithmetic_number_with_locale(
+                &r,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
             let (a, b) = match (ln, rn) {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
@@ -1381,8 +1379,16 @@ impl<'a> Interpreter<'a> {
 
     fn power(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let rn = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let ln = crate::coercion::to_arithmetic_number_with_locale(
+                &l,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
+            let rn = crate::coercion::to_arithmetic_number_with_locale(
+                &r,
+                &self.context.locale(),
+                self.context.date_system(),
+            );
             let (a, b) = match (ln, rn) {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),

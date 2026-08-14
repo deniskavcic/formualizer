@@ -25,6 +25,8 @@ pub struct GraphInstrumentation {
 mod ast_utils;
 pub mod editor;
 mod formula_analysis;
+#[cfg(test)]
+mod formula_analysis_legacy_tests;
 mod formula_dirty;
 mod names;
 pub(crate) mod prepared_legacy_graph;
@@ -2350,7 +2352,7 @@ impl DependencyGraph {
                 }
                 Ok(rewritten)
             }
-            ASTNodeType::Literal(_) => Ok(false),
+            ASTNodeType::Literal(_) | ASTNodeType::Omitted => Ok(false),
         }
     }
 
@@ -4037,6 +4039,19 @@ impl DependencyGraph {
     /// is O(in-degree) even mid-edit (no O(V) scan, no forced rebuild; #125).
     pub(crate) fn get_dependents(&self, vertex_id: VertexId) -> Vec<VertexId> {
         self.edges.in_edges_merged(vertex_id)
+    }
+
+    /// Bounded, delta-aware incoming-edge visitor used by read-only
+    /// introspection. Unlike `get_dependents`, this never constructs the full
+    /// in-degree before the caller's work limit can stop discovery.
+    pub(crate) fn visit_direct_dependents_bounded(
+        &self,
+        vertex_id: VertexId,
+        remaining_work: &mut u64,
+        visitor: &mut dyn FnMut(VertexId) -> bool,
+    ) -> bool {
+        self.edges
+            .visit_in_edges_bounded(vertex_id, remaining_work, visitor)
     }
 
     // Internal helper methods for Milestone 0.4

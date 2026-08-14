@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::used_extent::{ExtentPolicy, OpenRangeBounds, resolve_used_extent};
 use formualizer_common::LiteralValue;
 use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType};
 
@@ -20,6 +21,154 @@ impl RangeSelfUse {
 }
 
 impl DependencyGraph {
+    pub(crate) fn compressed_range_dependents_intersecting_deleted_rows(
+        &self,
+        sheet_id: SheetId,
+        start_row: u32,
+        end_row: u32,
+    ) -> Vec<VertexId> {
+        self.formula_to_range_deps
+            .iter()
+            .filter_map(|(&dependent, ranges)| {
+                ranges
+                    .iter()
+                    .any(|range| {
+                        let range_sheet_id = match range.sheet {
+                            SharedSheetLocator::Id(id) => id,
+                            // Formula analysis normalizes ingested locators to Id, so this
+                            // fallback is unreachable today; match the sibling query semantics.
+                            _ => sheet_id,
+                        };
+                        let range_start = range.start_row.map(|bound| bound.index).unwrap_or(0);
+                        let range_end = range.end_row.map(|bound| bound.index).unwrap_or(u32::MAX);
+                        range_sheet_id == sheet_id
+                            && range_start <= end_row
+                            && range_end >= start_row
+                    })
+                    .then_some(dependent)
+            })
+            .collect()
+    }
+
+    pub(crate) fn compressed_range_dependents_intersecting_deleted_columns(
+        &self,
+        sheet_id: SheetId,
+        start_col: u32,
+        end_col: u32,
+    ) -> Vec<VertexId> {
+        self.formula_to_range_deps
+            .iter()
+            .filter_map(|(&dependent, ranges)| {
+                ranges
+                    .iter()
+                    .any(|range| {
+                        let range_sheet_id = match range.sheet {
+                            SharedSheetLocator::Id(id) => id,
+                            // Formula analysis normalizes ingested locators to Id, so this
+                            // fallback is unreachable today; match the sibling query semantics.
+                            _ => sheet_id,
+                        };
+                        let range_start = range.start_col.map(|bound| bound.index).unwrap_or(0);
+                        let range_end = range.end_col.map(|bound| bound.index).unwrap_or(u32::MAX);
+                        range_sheet_id == sheet_id
+                            && range_start <= end_col
+                            && range_end >= start_col
+                    })
+                    .then_some(dependent)
+            })
+            .collect()
+    }
+
+    /// Visit compressed-range formula dependents covering one cell without
+    /// materializing the stripe union used by dirty propagation.
+    ///
+    /// This path is intentionally parallel to
+    /// `collect_range_dependents_for_rect`: scheduling keeps its existing
+    /// behavior, while inspection can stop before a pathological stripe has
+    /// been copied into an unbounded candidate set. Work is charged for every
+    /// stripe candidate and every compressed range exact-check.
+    pub(crate) fn visit_range_dependents_covering_bounded(
+        &self,
+        sheet_id: SheetId,
+        row0: u32,
+        col0: u32,
+        remaining_work: &mut u64,
+        visitor: &mut dyn FnMut(VertexId) -> bool,
+    ) -> bool {
+        if self.stripe_to_dependents.is_empty() {
+            return true;
+        }
+
+        let mut seen = FxHashSet::default();
+        let keys = [
+            StripeKey {
+                sheet_id,
+                stripe_type: StripeType::Column,
+                index: col0,
+            },
+            StripeKey {
+                sheet_id,
+                stripe_type: StripeType::Row,
+                index: row0,
+            },
+            StripeKey {
+                sheet_id,
+                stripe_type: StripeType::Block,
+                index: block_index(row0, col0),
+            },
+        ];
+
+        for key in keys {
+            if key.stripe_type == StripeType::Block && !self.config.enable_block_stripes {
+                continue;
+            }
+            let Some(candidates) = self.stripe_to_dependents.get(&key) else {
+                continue;
+            };
+            for &dependent in candidates {
+                if *remaining_work == 0 {
+                    return false;
+                }
+                *remaining_work -= 1;
+                if !seen.insert(dependent) {
+                    continue;
+                }
+                let Some(ranges) = self.formula_to_range_deps.get(&dependent) else {
+                    continue;
+                };
+                let mut covered = false;
+                for range in ranges {
+                    if *remaining_work == 0 {
+                        return false;
+                    }
+                    *remaining_work -= 1;
+                    // Match collect_range_dependents_for_rect: unresolved
+                    // non-Id locators are interpreted on the query sheet.
+                    let range_sheet = match range.sheet {
+                        SharedSheetLocator::Id(id) => id,
+                        _ => sheet_id,
+                    };
+                    if range_sheet != sheet_id {
+                        continue;
+                    }
+                    let start_row = range.start_row.map(|bound| bound.index).unwrap_or(0);
+                    let end_row = range.end_row.map(|bound| bound.index).unwrap_or(u32::MAX);
+                    let start_col = range.start_col.map(|bound| bound.index).unwrap_or(0);
+                    let end_col = range.end_col.map(|bound| bound.index).unwrap_or(u32::MAX);
+                    if start_row <= row0 && row0 <= end_row && start_col <= col0 && col0 <= end_col
+                    {
+                        covered = true;
+                        break;
+                    }
+                }
+                if covered && !visitor(dependent) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Public wrapper to add range-dependent edges.
     pub fn add_range_edges(
         &mut self,
@@ -87,6 +236,34 @@ impl DependencyGraph {
         }
     }
 
+    pub(crate) fn compressed_range_resolved_bounds(
+        &self,
+        sheet: SheetId,
+        range: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (start_row, end_row, start_col, end_col) = range;
+        let extent = resolve_used_extent(
+            OpenRangeBounds {
+                start_row,
+                start_column: start_col,
+                end_row,
+                end_column: end_col,
+            },
+            ExtentPolicy::GraphCompat {
+                fallback_row: self.config.max_open_ended_rows.saturating_sub(1),
+                fallback_column: self.config.max_open_ended_cols.saturating_sub(1),
+            },
+            |first, last| self.used_row_bounds_for_columns(sheet, first, last),
+            |first, last| self.used_col_bounds_for_rows(sheet, first, last),
+        )?;
+        Some((
+            extent.start_row,
+            extent.end_row,
+            extent.start_column,
+            extent.end_column,
+        ))
+    }
+
     /// Classify whether every occurrence of one compressed range that covers
     /// the formula cell is narrowed away from that cell by a statically
     /// resolvable `INDEX`. The range dependency itself remains conservative so
@@ -151,36 +328,6 @@ impl DependencyGraph {
                 && end_col.map(|index| index.saturating_sub(1)) == range.3
         }
 
-        fn resolved_bounds(
-            graph: &DependencyGraph,
-            sheet: SheetId,
-            range: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
-        ) -> Option<(u32, u32, u32, u32)> {
-            let (start_row, end_row, start_col, end_col) = range;
-            let row_query = (
-                start_row.unwrap_or(0),
-                end_row.unwrap_or(graph.config.max_open_ended_rows.saturating_sub(1)),
-            );
-            let col_query = (
-                start_col.unwrap_or(0),
-                end_col.unwrap_or(graph.config.max_open_ended_cols.saturating_sub(1)),
-            );
-            let used_rows = graph.used_row_bounds_for_columns(sheet, col_query.0, col_query.1);
-            let used_cols = graph.used_col_bounds_for_rows(sheet, row_query.0, row_query.1);
-            // Runtime range resolution anchors an omitted/open start at the
-            // first Excel row or column. Only an omitted end uses the current
-            // used maximum (then the configured open-ended fallback).
-            let sr = start_row.unwrap_or(0);
-            let er = end_row
-                .or_else(|| used_rows.map(|bounds| bounds.1))
-                .unwrap_or_else(|| graph.config.max_open_ended_rows.saturating_sub(1));
-            let sc = start_col.unwrap_or(0);
-            let ec = end_col
-                .or_else(|| used_cols.map(|bounds| bounds.1))
-                .unwrap_or_else(|| graph.config.max_open_ended_cols.saturating_sub(1));
-            (sr <= er && sc <= ec).then_some((sr, er, sc, ec))
-        }
-
         fn selected_region_contains_self(
             graph: &DependencyGraph,
             dependent: VertexId,
@@ -189,7 +336,7 @@ impl DependencyGraph {
             position: i64,
             explicit_col: Option<i64>,
         ) -> Option<bool> {
-            let (sr, er, sc, ec) = resolved_bounds(graph, range_sheet, range)?;
+            let (sr, er, sc, ec) = graph.compressed_range_resolved_bounds(range_sheet, range)?;
             let (row, col) = match explicit_col {
                 Some(col) => (position, col),
                 None if sr == er => (1, position),
@@ -292,7 +439,9 @@ impl DependencyGraph {
                             kind.merge(visit(graph, item, dependent, range_sheet, range, None))
                         })
                 }
-                ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => RangeSelfUse::NoMatch,
+                ASTNodeType::Literal(_) | ASTNodeType::Omitted | ASTNodeType::Reference { .. } => {
+                    RangeSelfUse::NoMatch
+                }
             }
         }
 

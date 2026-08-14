@@ -4,10 +4,80 @@ All notable changes to Formualizer will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Date-typed cells are treated as the numbers they are throughout the financial and statistical builtins. Excel has no separate date type on the sheet — a date cell holds a serial and is only formatted as a date — but three copy-pasted private coercion helpers plus two range collectors had no date arm, so `Date`/`DateTime`/`Time`/`Duration` cells were dropped or rejected. The consequences ranged from loud to invisible: `PRICE`, `YIELD`, `ACCRINT`, `ACCRINTM`, `TBILLPRICE`, `TBILLEQ`, `TBILLYIELD` returned `#VALUE!` when handed the date cells a workbook loaded from XLSX actually contains in their `settlement`/`maturity`/`issue` arguments; `NPV` returned `#VALUE!`; `XNPV`/`XIRR` returned `#NUM!` on their `values` argument; and `IRR`, `MIRR`, `MEDIAN`, `STDEV`, `VAR`, `LARGE`, `SMALL`, `PRODUCT`, `DEVSQ`, `PERCENTILE`, `QUARTILE`, `CORREL`, `SLOPE`, `RSQ`, `COVARIANCE`, `MAXA`, `MINA`, `AVERAGEA`, `STDEVA`, `VARA` and their siblings returned a *different number* with no error at all — while `SUM`, `AVERAGE` and `COUNT` over the very same range counted the date. All of these now agree with the numerically identical serial. (#328)
+- `XNPV` and `XIRR` truncate date serials to whole days. A cell holding `2024-01-01 12:00` (serial 45292.5) now discounts as day 45292, matching Microsoft's documented remark that numbers in dates are truncated to integers, and reproduced against LibreOffice 24.2.7.2, which returns `308.187137202582` where formualizer previously returned `308.357947738306`. (#328)
+- The date-serial conversion used by the financial builtins is now the crate-central `coercion::to_serial_strict` rather than three local duplicates, so it honours the workbook's date system and covers `Time`/`Duration` as well as `Date`/`DateTime`. (#328)
+
+### Python bindings
+
+- `SheetPortSession.evaluate_once`, `write_inputs`, `read_inputs` and `read_outputs` release the GIL while the engine runs. `SheetPortSession` owns a `Workbook` and `from_manifest_yaml` accepts a user-supplied one, so Python-backed custom functions are reachable from a SheetPort evaluation and hit exactly the deadlock fixed on `Workbook.evaluate_*`: the calling thread held the GIL waiting for the parallel layer while rayon workers blocked in `PyGILState_Ensure`. (#327)
+- Using a `Workbook` from inside one of its own Python custom functions raises `RuntimeError` instead of hanging forever. The engine holds a non-reentrant lock for the duration of an evaluation, so `get_value` on an uncached cell, `set_value`, `sheet_names`, a nested `evaluate_*`, `Sheet.get_cell` and every other workbook operation could never be granted and blocked permanently — non-deterministically, since `get_value` served from the compatibility cache returned normally. `cancel()` and `reset_cancel()` remain safe from a callback, and a callback may still drive a *different* workbook. The contract is documented on `register_function`. (#327)
+- The Python test suite is bounded by `faulthandler_timeout` with `faulthandler_exit_on_timeout`, and every CI job has a `timeout-minutes`. A deadlock regression now fails in 90 seconds with every thread's stack dumped, instead of running until GitHub's six-hour default. Measured: neither pytest-timeout's `thread` nor its `signal` method fires during a GIL deadlock, because both need to execute Python. (#327)
+
+## [0.8.3] - 2026-08-13
+
+### Fixed
+
+- Approximate `MATCH`, `VLOOKUP`, and `HLOOKUP` skip error cells in the lookup range instead of propagating them. 0.8.2 introduced range-wide propagation, which diverged from desktop Excel on 8 of 10 measured oracle rows: a single `#DIV/0!` anywhere in a lookup column poisoned every approximate lookup over that column, where Excel answers normally. Error cells are projected out of the search exactly like blanks and other-class entries — they cannot be returned, do not break sortedness, and are not propagated even when a bisection probe lands on one. A range with nothing searchable left yields `#N/A`, and exact mode still never matches an error cell. Oracle contributed by an external reporter running desktop Excel 16.105.3 under AppleScript automation. (#326)
+- Descending approximate `MATCH` returns the *first* entry of an exact-match run rather than the last, matching Excel; the last qualifying entry is still returned when the needle falls between two values. This affected ranges with fewer than eight searchable entries, whose linear path lacked the exact-match rule the bisection path already had. (#326)
+
+## [0.8.2] - 2026-08-11
+
+### Fixed
+
+- Python wheels evaluate `TODAY()` and `NOW()` against the host clock. The binding did not enable the `system-clock` feature, so the engine fell back to a fixed clock at the UTC epoch and every volatile date/time builtin answered 1970-01-01 in every published wheel — silently, with no error and no type difference, so any ageing bucket or accrual-to-date returned a plausible wrong number. Reported externally. (#318)
+- Temporal values compare as workbook-date-system serials across exact and approximate lookup paths, including warm lookup indexes. (#316)
+- Approximate `MATCH`, `VLOOKUP`, and `HLOOKUP` skip blank and incomparable entries without losing original-range positions, while propagating lookup-range errors. (#317)
+- Descending approximate `MATCH` returns the last qualifying entry for ranges with eight or more searchable values, including ranges with interior blanks. (#320)
+
+## [0.8.1] - 2026-08-11
+
+### Fixed
+
+- Row and column deletion now recalculates formulas that read affected whole-column, whole-row, or other compressed open ranges, instead of returning stale pre-deletion values while reporting them as current. Insertion still does not invalidate position-sensitive open-range readers such as `MATCH` and `INDEX`; that pre-existing gap is tracked separately. (#306)
+- Arithmetic on a date-typed cell no longer returns `#NUM!` when the result falls outside the representable date range. `Date`/`DateTime` operands keep their temporal tag when the resulting serial is representable, and degrade to a plain number when it is not, instead of manufacturing a numeric-domain error. This most visibly affected `end_date - start_date` accrual expressions whenever the period ran backwards: a perfectly ordinary negative day count became `#NUM!` and propagated through every downstream cell. NaN and infinity operands continue to error. Reported externally with a full reproduction and LibreOffice cross-check. (#310)
+
+## [0.8.0] - 2026-08-10
+
+### Engine introspection (new)
+
+- Added `formualizer_eval::engine::inspect`, a public, engine-native introspection API: `inspect_cell`, `precedents`, `dependents`, `trace`, and `range_page`. Reports are owned, stamped snapshots addressed in A1 space, bounded by explicit `max_work` discovery budgets that degrade in band rather than failing, with truncation reported through `TruncationReport`/`OmittedCount`. Declared references come from the formula authority rather than the dependency graph, so precedent shape and source order survive; the graph supplies reverse reachability and state. Cycle classification is complete, not merely sound: a reachability post-pass guarantees that an unmarked link is safe to expand. Bounded `dependents` selection is canonical — the address-least N of the candidates discovered within budget — so truncated reports do not depend on internal representation.
+- Reports are plane-independent: legacy and authoritative FormulaPlane engines return field-identical reports for identical logical workbook state, apart from state stamps, with two documented exceptions — per-cell staleness may be more conservative under FormulaPlane authority after structural edits and before re-evaluation, and reports produced under a binding `max_work` budget are representation-dependent in how much they discover.
+- Python bindings expose all five entry points with keyword options matching core defaults, immutable typed reports, `Arc`-backed trace graphs whose node handles outlive their parents, A1-keyed mapping access, bounded `__repr__`, `to_dict()`, value equality and hashing where the core defines them, and a typed exception hierarchy carrying stable codes. Every output enum carries an explicit `Unknown` member so future core variants can never masquerade as a specific known one.
+- WASM bindings expose the same surface with owned maps-as-objects reports, decimal-string `u64` stamps and omitted counts, stable tagged enum and value shapes, typed inspection errors including binding-side input validation, and an explicit hand-written TypeScript surface checked against real runtime output by a committed conformance gate.
+
+### Added
+
+- `formualizer_common::{CellAddress, RangeArea}` grid address types with validated construction and total `Display`, plus `address::format_a1_sheet_name` and `a1_sheet_name_needs_quoting`.
+- A unified used-extent resolver behind explicit `ExtentPolicy` variants, replacing roughly two dozen ad hoc extent derivations while preserving each site's documented behaviour.
+- A streaming, source-ordered semantic reference collector (`engine::refs`) now used by the graph, ingest, and plan-expansion paths, replacing three independent walks.
+
+### Fixed
+
+- Omitted function-argument slots are represented in the AST and evaluated as Excel does, instead of being silently treated as empty text or blank cells. (#277)
+- `DCOUNTA` and `DGET` no longer mishandle empty-text criteria. (#281)
+- `VLOOKUP` and `HLOOKUP` default `range_lookup` to approximate matching, matching Excel and LibreOffice. (#280)
+- Formula results reached through a truly blank cell publish numeric `0`. (#279)
+- Date and time text values coerce correctly in arithmetic. (#289)
+- Wildcard `*` matching in criteria is correct for all patterns, verified by 64,687,036 differential comparisons against two independent reference implementations. (#284)
+- `NPV` accepts variadic value arguments with Excel's reference and array semantics, verified against 804 corpus workbook cells. (#293)
+- Saturating area arithmetic at three reference-collection sites, and heap-based iteration replacing recursion in reference collection, so deeply nested formulas no longer risk stack exhaustion.
+- `Engine::get_cell` returned the anchor placement's literals for parameterized span families under FormulaPlane authority, producing wrong formula text.
+
+
+### Python bindings
+
+- Added immutable, typed reports for `Workbook.inspect_cell`, `precedents`, `dependents`, `trace`, and `range_page`, including A1-keyed trace-node access, bounded representations, serialization helpers, state stamps, and inspection-specific exceptions.
+
 ### Breaking changes
+
+- VLOOKUP and HLOOKUP now default `range_lookup` to approximate matching (`TRUE`), matching Excel and LibreOffice. Existing formulas that relied on the old exact default should pass `FALSE` or `0` explicitly to keep exact matching; numeric zero and explicitly omitted slots are exact.
 
 #### Parser/SDK 3.0 preparation
 
+- `ASTNodeType` adds the `Omitted` variant for explicitly omitted function-argument slots. Exhaustive Rust matches and AST projections must handle the new node; it remains distinct from empty text and blank-cell values. (#277)
 - `formualizer-common` and `formualizer-parse` now share version 3.0.0. The major records the removal of the four 2.0 token-vector/classifier `Parser` constructors in favor of source strings, `TokenStream`, and `ParserBuilder`; the deleted token-vector parser is not restored. See `docs/parser-sdk-3-migration.md`. (#257)
 - Reported error/outcome vocabularies (`ExcelErrorKind`, resource and staleness reasons, `ExcelErrorExtra`, common coordinate/address/value errors, `RecoveryAction`, and `ParsingError`) are now non-exhaustive. Downstream output mappings use deliberate future fallbacks, while caller-supplied/core enums remain exhaustive. Serde unknown variants remain a separate wire-compatibility concern. (#257)
 - Restored the inexpensive legacy `formualizer_common::value::{datetime_to_serial, serial_to_datetime}` paths as forwarding reexports; the root and `date_serial` paths remain available. (#257)
@@ -25,6 +95,9 @@ All notable changes to Formualizer will be documented in this file.
 
 ### Added
 
+- Exposed all five engine introspection entry points through the WASM workbook binding with owned maps-as-objects reports, decimal-string state stamps and omitted counts, stable tagged enum/value shapes, typed inspection errors, and an explicit TypeScript surface. Duration values retain the inherited `TimeDelta { secs: N, nanos: N }` debug string pending a coordinated pre-1.0 workbook value-convention revision.
+- Added the read-only engine-native introspection API: stamped owned cell snapshots, declared precedents, bounded direct and range-covering dependents, bounded BFS trace DAGs with reachability-based cycle/convergence/spill semantics, and revision-checked semantic range pages. Reports preserve canonical sheet casing and source-ordered reference shape without semantic mutation, though inspection may warm snapshot-guarded performance caches. Inspection reports are plane-independent: legacy and authoritative FormulaPlane engines return field-identical semantics for identical logical workbook state, apart from state stamps. Two exceptions apply: after structural edits and before re-evaluation, per-cell staleness may be more conservative (`Dirty`) under FormulaPlane authority than legacy; and reports produced under a binding `max_work` budget are representation-dependent in how much they discover. Bounded dependents retain the first `max_results` by canonical address from all candidates discovered within `max_work`, making non-work-bound truncation deterministic across authorities. `formualizer-eval` exposes serialization behind its new non-default `serde` feature; stamps and request option structs deserialize as well as serialize. Ordinary dependents now leave `Dependent::via` empty, reserving it for spill-anchor queries, and `SnapshotOptions::include_values` uses the same plural spelling as the other options. The `formualizer` facade reexports the inspection DTOs as types-only until workbook and binding integration lands; call the engine methods through `formualizer-eval` for now.
+- Added binding-neutral `CellAddress` and open-ended `RangeArea` types to `formualizer-common`, with checked in-grid 1-based construction, finite `RangeAddress` conversions, serde support, and total canonical quoted-sheet A1 display for cells, including `#REF!` sentinels for unchecked zero coordinates and unbounded bijective base-26 rendering beyond XFD. `TryFrom<RangeAddress> for CellAddress` now consistently reports `SheetAddressError`.
 - Tables can be defined at runtime, without a serialise-and-reload round trip: `Workbook::define_table` (Rust), `Workbook.addTable` (WASM) and `Workbook.add_table` (Python), plus `tables()` / `getTables()` to list them. Tables are metadata over cells that already exist, so populate the region first; structured references resolve immediately afterwards and edits inside the region propagate. Definitions are validated up front -- unknown sheet, 1-based range violations, an inverted range, a header row with no data rows, and a header count that does not match the range width are all rejected by name rather than silently producing a table whose columns read outside its own range. The WASM binding rejects unknown keys instead of ignoring them and ships `TableDefinition`/`TableMetadata` TypeScript interfaces. (#212)
 - Documented the JSON workbook format in `docs/json-workbook-format.md`, including the previously undocumented `tables` entry, the adjacently tagged cell-value shape, and the trap that a `tables` key outside a sheet is silently ignored. The worked example and the documented defaults are covered by tests. (#212)
 - Added canonical checked Excel 1900/1904 date-serial conversion APIs to `formualizer-common`, including separate display semantics for serials 0 and 60 and source-compatible Excel-1900 wrappers for the existing common API.
@@ -45,11 +118,29 @@ All notable changes to Formualizer will be documented in this file.
 
 ### Improved
 
+- Consolidated the engine's graph, ingest, and planning AST dependency walks behind one crate-private semantic reference collector without changing their independent policies or behavior.
+- Consolidated whole-axis and partially open used-extent resolution behind one internal policy-driven resolver while preserving the distinct runtime, virtual-dependency, graph, and semantic policies.
 - Narrowed the published eval API to stable table metadata, reference-adjustment conveniences, builtin loading/date compatibility helpers, and opaque Formula Plane descriptors; test-only helpers now require the non-default `test-support` feature. (#259)
 - Upgraded Calamine-backed XLSX loading to Calamine 0.36 and a single-pass value/formula metadata stream, preserving formula-only worksheet dimensions, cached-value semantics, load limits, shared-formula relocation, and malformed-family fallback.
 
+### Testing / internal
+
+- Added a fixed-seed AST-to-edge parity harness covering structural edits, compressed ranges, symbol vertices, dirty propagation, and mutation-tested edge-maintenance failures.
+- Pinned a fourth AST-to-edge finding, `AST_EDGE_INSERT_SHIFTS_NAME_VERTEX_ONTO_GRID`: a default-sheet row or column insert shifts a workbook-name vertex off its `Sheet1!$A$1` home onto an addressable cell, so references resolved afterwards bind to the name vertex instead of the cell. The campaign carve-out for default-sheet inserts is narrowed to that shape, restoring formula and value overwrite coverage on the default sheet.
+
 ### Fixed
 
+- `Engine::get_cell` now reconstructs placement-specific literals for parameterized authoritative FormulaPlane families instead of returning the anchor placement's formula text for every member.
+- Whole-surface ranges whose cell count overflows `u32` are now always kept as compressed range dependencies instead of panicking or attempting expansion.
+- Lookup wildcards now let `*` consume zero or more characters instead of at most one, including multi-star backtracking, `?` adjacency, `~` escapes, case-insensitive Unicode text, and exact-mode VLOOKUP/HLOOKUP/MATCH plus wildcard-mode XLOOKUP/XMATCH. (#284)
+- `NPV` now accepts up to 254 scalar, reference, and array cash-flow arguments in argument order. Text, blank, and logical cells in references are ignored without consuming periods, direct text and computed-array text return `#VALUE!`, omitted slots count as zero, errors propagate, and `rate=-1` returns `#NUM!`. (#293)
+- Arithmetic operators now coerce supported en-US date, time, and datetime text operands to serial numbers using the workbook's 1900 or 1904 date system. Two-digit years in slash and English month-name forms use the Excel 29/30 window, ISO dates require a four-digit year, slash dates use month/day/year ordering, and `T` is restricted to ISO datetimes; aggregate, comparison, criteria, `N`, and concatenation text semantics remain unchanged. (#289)
+- `DATEVALUE` and `TIMEVALUE` now use the shared deterministic temporal parsers: two-digit date years use the Excel 29/30 window, surrounding whitespace is accepted, interior slash-date whitespace is rejected, and whitespace around time separators is accepted. `DATEVALUE` retains its pre-existing unambiguous day/month/year and year/month/day slash fallbacks for compatibility. (#289)
+- Date, datetime, time, and duration literals used by `*`, `/`, `^`, unary minus, or `%` now convert under the workbook's selected date system instead of implicitly using the Excel-1900 system. (#289)
+- Database functions now distinguish explicit empty text from genuinely blank field cells: `DCOUNTA` counts the former, while `DGET` ignores the latter, matching LibreOffice and Excel. (#281)
+- Formula cells whose final result passes through a truly blank cell now publish numeric `0`, matching Excel and LibreOffice, while direct blank-cell inspection and range semantics remain unchanged. Blank elements in spilled results are likewise published as zero; JSON persistence and Python/WASM value surfaces now expose these computed results as `0` instead of empty/`None`/`null`. (#279)
+- Explicitly omitted function arguments now retain their syntax through parsing and canonical rendering, coerce as Excel empty arguments (`0`, `FALSE`, or empty text by context), and count as numeric zero in aggregates without changing absent optional defaults or blank-reference behavior. (#277)
+- `TEXT` with an empty format string (explicit `""` or an omitted second argument) now returns empty text, matching Excel and LibreOffice; it previously rendered the value as if unformatted. (#277)
 - Restored the released `formualizer_eval::builtins::datetime` conversion helpers and sparse-sheet constructor compatibility paths, including explicit 1904 date-system handling. The eval decode wrappers retain released 0.7.1 component-clamping and negative-fraction behavior; as an intentional safety deviation, infinities and chrono date/duration overflow now return typed `#NUM!` instead of panicking. (#259)
 
 - CFFI targeted cell evaluation now reports both the targeted graph-preparation error and the distinct full-graph fallback error when both preparation attempts fail.
@@ -358,7 +449,11 @@ All notable changes to Formualizer will be documented in this file.
 
 - Incomplete product release due to partial publication during the release workflow. Superseded by `0.5.1`.
 
-[Unreleased]: https://github.com/PSU3D0/formualizer/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/PSU3D0/formualizer/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/PSU3D0/formualizer/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/PSU3D0/formualizer/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/PSU3D0/formualizer/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/PSU3D0/formualizer/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/PSU3D0/formualizer/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/PSU3D0/formualizer/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/PSU3D0/formualizer/compare/v0.5.9...v0.6.0

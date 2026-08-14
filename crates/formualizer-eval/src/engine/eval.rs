@@ -22,6 +22,9 @@ use crate::engine::spill::{RegionLockManager, SpillMeta, SpillShape};
 use crate::engine::target_preparation::{
     StagedFormulaIndex, StagedFormulaLease, StagedPackageLease,
 };
+use crate::engine::used_extent::{
+    ExtentPolicy, OpenRangeBounds, resolve_used_extent_with_fallback,
+};
 use crate::engine::virtual_deps::{DynamicRefVirtualDepProvider, VirtualDepBuilder};
 use crate::engine::{
     CycleDetection, CyclePolicy, DependencyGraph, EvalConfig, EvaluationRequestKind,
@@ -1090,6 +1093,63 @@ pub struct Engine<R> {
 
 /// Minimal edit surface used by `Engine::action`.
 ///
+fn substitute_formula_plane_literal_slots(ast: &ASTNode, binding: &[LiteralValue]) -> ASTNode {
+    fn visit(ast: &ASTNode, binding: &[LiteralValue], next: &mut usize, in_array: bool) -> ASTNode {
+        let node_type = match &ast.node_type {
+            ASTNodeType::Literal(_) if !in_array => {
+                let value = binding.get(*next).cloned().unwrap_or(LiteralValue::Empty);
+                *next = next.saturating_add(1);
+                ASTNodeType::Literal(value)
+            }
+            ASTNodeType::Literal(value) => ASTNodeType::Literal(value.clone()),
+            ASTNodeType::Omitted => ASTNodeType::Omitted,
+            ASTNodeType::Reference {
+                original,
+                reference,
+            } => ASTNodeType::Reference {
+                original: original.clone(),
+                reference: reference.clone(),
+            },
+            ASTNodeType::UnaryOp { op, expr } => ASTNodeType::UnaryOp {
+                op: op.clone(),
+                expr: Box::new(visit(expr, binding, next, in_array)),
+            },
+            ASTNodeType::BinaryOp { op, left, right } => ASTNodeType::BinaryOp {
+                op: op.clone(),
+                left: Box::new(visit(left, binding, next, in_array)),
+                right: Box::new(visit(right, binding, next, in_array)),
+            },
+            ASTNodeType::Function { name, args } => ASTNodeType::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| visit(arg, binding, next, in_array))
+                    .collect(),
+            },
+            ASTNodeType::Call { callee, args } => ASTNodeType::Call {
+                callee: Box::new(visit(callee, binding, next, in_array)),
+                args: args
+                    .iter()
+                    .map(|arg| visit(arg, binding, next, in_array))
+                    .collect(),
+            },
+            ASTNodeType::Array(rows) => ASTNodeType::Array(
+                rows.iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|cell| visit(cell, binding, next, true))
+                            .collect()
+                    })
+                    .collect(),
+            ),
+        };
+        ASTNode::new(node_type, ast.source_token.clone())
+    }
+
+    let mut next = 0;
+    visit(ast, binding, &mut next, false)
+}
+
 /// This wrapper is intentionally thin for ticket 614 (commit-only): it delegates to existing
 /// `Engine` edit methods and does not create changelog boundaries or implement rollback.
 impl<R: EvaluationContext> Engine<R> {
@@ -3586,7 +3646,7 @@ where
             self.lookup_index_cache.note_skipped_volatile();
             return None;
         }
-        match LookupIndex::build(view, axis).ok()? {
+        match LookupIndex::build(view, axis, self.config.date_system).ok()? {
             BuildOutcome::Built(index) => self.lookup_index_cache.insert_if_room(key, index),
             BuildOutcome::ErrorInLookupAxis => {
                 self.lookup_index_cache.note_skipped_error();
@@ -4358,6 +4418,11 @@ where
             formula_plane_cycle_member_span_demotions: self
                 .formula_plane_cycle_member_span_demotions,
         }
+    }
+
+    /// Mutation revision captured by read-only engine reports.
+    pub(crate) fn inspection_mutation_revision(&self) -> u64 {
+        self.snapshot_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -6754,7 +6819,7 @@ where
                     Self::collect_planning_function_requests(cell, requests);
                 }
             }
-            ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => {}
+            ASTNodeType::Literal(_) | ASTNodeType::Omitted | ASTNodeType::Reference { .. } => {}
         }
     }
 
@@ -9385,7 +9450,7 @@ where
                     | ReferenceType::Range3D { .. },
                 ..
             } => Some(crate::engine::OpaqueReason::UnresolvedCrossSheetBinding),
-            ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => None,
+            ASTNodeType::Literal(_) | ASTNodeType::Omitted | ASTNodeType::Reference { .. } => None,
         }
     }
 
@@ -9544,7 +9609,8 @@ where
                         | ReferenceType::Range { sheet: None, .. },
                     ..
                 }
-                | ASTNodeType::Literal(_) => (true, false),
+                | ASTNodeType::Literal(_)
+                | ASTNodeType::Omitted => (true, false),
                 ASTNodeType::Call { .. } | ASTNodeType::Reference { .. } => (false, false),
             }
         }
@@ -12285,7 +12351,7 @@ where
                 Self::ast_contains_function(left) || Self::ast_contains_function(right)
             }
             ASTNodeType::Array(rows) => rows.iter().flatten().any(Self::ast_contains_function),
-            ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => false,
+            ASTNodeType::Literal(_) | ASTNodeType::Omitted | ASTNodeType::Reference { .. } => false,
         }
     }
 
@@ -12696,6 +12762,7 @@ where
                         ASTNodeType::Literal(value)
                     }
                     ASTNodeType::Literal(value) => ASTNodeType::Literal(value.clone()),
+                    ASTNodeType::Omitted => ASTNodeType::Omitted,
                     ASTNodeType::Reference {
                         original,
                         reference,
@@ -14075,6 +14142,7 @@ where
                         ASTNodeType::Literal(value)
                     }
                     ASTNodeType::Literal(value) => ASTNodeType::Literal(value.clone()),
+                    ASTNodeType::Omitted => ASTNodeType::Omitted,
                     ASTNodeType::Reference {
                         original,
                         reference,
@@ -16859,6 +16927,33 @@ where
         asheet.range_view(sr0, sc0, er0, ec0)
     }
 
+    pub(crate) fn formula_plane_span_ast_at(
+        &self,
+        span_ref: FormulaSpanRef,
+        placement: PlacementCoord,
+    ) -> Option<ASTNode> {
+        let authority = self.graph.formula_authority();
+        let span = authority.plane.spans.get(span_ref)?;
+        let relocation = span.ast_relocation;
+        let mut ast = self
+            .graph
+            .data_store()
+            .retrieve_ast(relocation.ast_id, self.graph.sheet_reg())?;
+        if let Some(binding_set_id) = span.binding_set_id {
+            let binding_set = authority.plane.binding_sets.get(binding_set_id)?;
+            if !binding_set.is_single_literal_binding() {
+                let binding =
+                    binding_set.literal_bindings_for_placement(&span.domain, placement)?;
+                ast = substitute_formula_plane_literal_slots(&ast, binding.as_ref());
+            }
+        }
+        let row = placement.row.checked_add(1)?;
+        let col = placement.col.checked_add(1)?;
+        let row_delta = i64::from(row) - i64::from(relocation.anchor_row);
+        let col_delta = i64::from(col) - i64::from(relocation.anchor_col);
+        relocate_ast_for_template_placement(&ast, row_delta, col_delta).ok()
+    }
+
     /// Get formula AST (if any) and current stored value for a cell
     pub fn get_cell(
         &self,
@@ -16882,17 +16977,7 @@ where
                 // Span authority wins before graph lookup. Missing or invalid
                 // relocation state is fail-closed: never expose a stale legacy
                 // vertex for a coordinate owned by a span.
-                let authority = self.graph.formula_authority();
-                let ast = authority.plane.spans.get(span).and_then(|record| {
-                    let relocation = record.ast_relocation;
-                    let ast = self
-                        .graph
-                        .data_store()
-                        .retrieve_ast(relocation.ast_id, self.graph.sheet_reg())?;
-                    let row_delta = i64::from(row) - i64::from(relocation.anchor_row);
-                    let col_delta = i64::from(col) - i64::from(relocation.anchor_col);
-                    relocate_ast_for_template_placement(&ast, row_delta, col_delta).ok()
-                });
+                let ast = self.formula_plane_span_ast_at(span, placement);
                 return Some((ast, v));
             }
             crate::formula_plane::runtime::FormulaResolution::Overlay(overlay_ref) => {
@@ -17108,7 +17193,8 @@ where
         // If array result, perform spill from the anchor cell
         match result {
             Ok(cv) => {
-                let result_literal = cv.into_literal();
+                let result_literal =
+                    crate::engine::result_finalization::finalize_formula_result(cv.into_literal());
                 match result_literal {
                     LiteralValue::Array(rows) => {
                         // Update kind to FormulaArray for tracking
@@ -22469,7 +22555,9 @@ where
 
         interpreter
             .evaluate_arena_ast(ast_id, self.graph.data_store(), self.graph.sheet_reg())
-            .map(|cv| cv.into_literal())
+            .map(|cv| {
+                crate::engine::result_finalization::finalize_formula_result(cv.into_literal())
+            })
     }
 
     /// Get access to the shared thread pool for parallel evaluation
@@ -23117,6 +23205,46 @@ where
     }
 }
 
+impl<R> Engine<R>
+where
+    R: EvaluationContext,
+{
+    /// Semantic used coordinates exclude graph-only dependency placeholders.
+    ///
+    /// Non-empty base/overlay/computed cells come from Arrow storage, while
+    /// scalar and array formulas come from graph formula kinds even before
+    /// their results are materialized. The legacy graph fallback is omitted:
+    /// `load_packed_to_vertex` entries are either represented by those sources
+    /// or are `Empty` dependency placeholders, not a third value authority.
+    pub(crate) fn semantic_used_rows_for_columns(
+        &self,
+        sheet: &str,
+        start_col: u32,
+        end_col: u32,
+    ) -> Option<(u32, u32)> {
+        let arrow_bounds = self
+            .sheet_store()
+            .sheet(sheet)
+            .and_then(|_| self.arrow_used_row_bounds(sheet, start_col, end_col));
+        let formula_bounds = self.formula_row_bounds_for_columns(sheet, start_col, end_col);
+        Self::union_used_bounds(arrow_bounds, formula_bounds)
+    }
+
+    pub(crate) fn semantic_used_cols_for_rows(
+        &self,
+        sheet: &str,
+        start_row: u32,
+        end_row: u32,
+    ) -> Option<(u32, u32)> {
+        let arrow_bounds = self
+            .sheet_store()
+            .sheet(sheet)
+            .and_then(|_| self.arrow_used_col_bounds(sheet, start_row, end_row));
+        let formula_bounds = self.formula_col_bounds_for_rows(sheet, start_row, end_row);
+        Self::union_used_bounds(arrow_bounds, formula_bounds)
+    }
+}
+
 // Override EvaluationContext to provide thread pool access
 impl<R> crate::traits::EvaluationContext for Engine<R>
 where
@@ -23518,76 +23646,55 @@ where
                     None
                 };
 
-                let mut sr = bounded_range
+                let sr = bounded_range
                     .as_ref()
                     .map(|r| r.start.coord.row() + 1)
                     .or_else(|| range.start_row.map(|b| b.index + 1));
-                let mut sc = bounded_range
+                let sc = bounded_range
                     .as_ref()
                     .map(|r| r.start.coord.col() + 1)
                     .or_else(|| range.start_col.map(|b| b.index + 1));
-                let mut er = bounded_range
+                let er = bounded_range
                     .as_ref()
                     .map(|r| r.end.coord.row() + 1)
                     .or_else(|| range.end_row.map(|b| b.index + 1));
-                let mut ec = bounded_range
+                let ec = bounded_range
                     .as_ref()
                     .map(|r| r.end.coord.col() + 1)
                     .or_else(|| range.end_col.map(|b| b.index + 1));
 
-                if sr.is_none() && er.is_none() {
-                    // Full-column reference: anchor at row 1
-                    let scv = sc.unwrap_or(1);
-                    let ecv = ec.unwrap_or(scv);
-                    sr = Some(1);
-                    if let Some((_, max_r)) = self.used_rows_for_columns(sheet_name, scv, ecv) {
-                        er = Some(max_r);
-                    } else if let Some((max_rows, _)) = self.sheet_bounds(sheet_name) {
-                        er = Some(self.config.max_open_ended_rows);
-                    }
-                }
-                if sc.is_none() && ec.is_none() {
-                    // Full-row reference: anchor at column 1
-                    let srv = sr.unwrap_or(1);
-                    let erv = er.unwrap_or(srv);
-                    sc = Some(1);
-                    if let Some((_, max_c)) = self.used_cols_for_rows(sheet_name, srv, erv) {
-                        ec = Some(max_c);
-                    } else if let Some((_, max_cols)) = self.sheet_bounds(sheet_name) {
-                        ec = Some(self.config.max_open_ended_cols);
-                    }
-                }
-                if sr.is_some() && er.is_none() {
-                    let scv = sc.unwrap_or(1);
-                    let ecv = ec.unwrap_or(scv);
-                    if let Some((_, max_r)) = self.used_rows_for_columns(sheet_name, scv, ecv) {
-                        er = Some(max_r);
-                    } else if let Some((max_rows, _)) = self.sheet_bounds(sheet_name) {
-                        er = Some(self.config.max_open_ended_rows);
-                    }
-                }
-                if er.is_some() && sr.is_none() {
-                    // Open start: anchor at row 1
-                    sr = Some(1);
-                }
-                if sc.is_some() && ec.is_none() {
-                    let srv = sr.unwrap_or(1);
-                    let erv = er.unwrap_or(srv);
-                    if let Some((_, max_c)) = self.used_cols_for_rows(sheet_name, srv, erv) {
-                        ec = Some(max_c);
-                    } else if let Some((_, max_cols)) = self.sheet_bounds(sheet_name) {
-                        ec = Some(self.config.max_open_ended_cols);
-                    }
-                }
-                if ec.is_some() && sc.is_none() {
-                    // Open start: anchor at column 1
-                    sc = Some(1);
-                }
-
-                let sr = sr.unwrap_or(1);
-                let sc = sc.unwrap_or(1);
-                let er = er.unwrap_or(sr.saturating_sub(1));
-                let ec = ec.unwrap_or(sc.saturating_sub(1));
+                let extent = resolve_used_extent_with_fallback(
+                    OpenRangeBounds {
+                        start_row: sr,
+                        start_column: sc,
+                        end_row: er,
+                        end_column: ec,
+                    },
+                    ExtentPolicy::EvaluationCompat {
+                        fallback_row: None,
+                        fallback_column: None,
+                    },
+                    || {
+                        self.sheet_bounds(sheet_name)
+                            .map(|_| self.config.max_open_ended_rows)
+                    },
+                    || {
+                        self.sheet_bounds(sheet_name)
+                            .map(|_| self.config.max_open_ended_cols)
+                    },
+                    |first, last| self.used_rows_for_columns(sheet_name, first, last),
+                    |first, last| self.used_cols_for_rows(sheet_name, first, last),
+                );
+                let (sr, sc, er, ec) = extent
+                    .map(|extent| {
+                        (
+                            extent.start_row,
+                            extent.start_column,
+                            extent.end_row,
+                            extent.end_column,
+                        )
+                    })
+                    .unwrap_or((1, 1, 0, 0));
 
                 if self.force_materialize_range_views {
                     if er < sr || ec < sc {
@@ -24721,7 +24828,11 @@ where
                 let interpreter = Interpreter::new_with_cell(ctx, sheet_name, cell_ref);
                 interpreter
                     .evaluate_arena_ast(ast_id, self.graph.data_store(), self.graph.sheet_reg())
-                    .map(|cv| cv.into_literal())
+                    .map(|cv| {
+                        crate::engine::result_finalization::finalize_formula_result(
+                            cv.into_literal(),
+                        )
+                    })
             }
             VertexKind::NamedScalar | VertexKind::NamedArray => {
                 let named_range = self.graph.named_range_by_vertex(vertex_id).ok_or_else(|| {

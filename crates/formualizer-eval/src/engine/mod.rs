@@ -15,18 +15,24 @@ pub mod graph;
 pub mod ingest;
 pub mod ingest_builder;
 pub(crate) mod ingest_pipeline;
+pub mod inspect;
 pub mod journal;
 pub mod live_edges;
 pub mod live_graph;
 pub mod lookup_index_cache;
 pub mod plan;
+#[cfg(test)]
+mod plan_legacy_tests;
 pub mod range_view;
+pub(crate) mod refs;
 pub mod resource_ledger;
 pub mod resource_observability;
+pub(crate) mod result_finalization;
 pub mod row_visibility;
 pub mod scheduler;
 pub mod spill;
 mod target_preparation;
+pub(crate) mod used_extent;
 pub mod vertex;
 pub mod virtual_deps;
 

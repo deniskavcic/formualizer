@@ -1,7 +1,7 @@
 //! Shared helpers for lookup-family functions (MATCH, VLOOKUP, HLOOKUP, XLOOKUP)
 //! Provides unified coercion, comparison and approximate-mode selection logic.
 
-use crate::engine::range_view::RangeView;
+use crate::engine::{DateSystem, range_view::RangeView};
 use arrow_array::Array;
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 
@@ -9,13 +9,20 @@ use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 /// - Number / Int: numeric
 /// - Text: parsed if it looks numeric (lenient)
 /// - Boolean: TRUE=1, FALSE=0
+/// - Date / DateTime / Time: the Excel serial number. Excel has no date type
+///   at the formula level -- a date cell holds a serial carrying a date number
+///   format -- so a temporal value must order against plain numerics and
+///   against other temporal values exactly as two numbers do.
 /// - Empty: treated as 0
-pub fn value_to_f64_lenient(v: &LiteralValue) -> Option<f64> {
+pub fn value_to_f64_lenient(v: &LiteralValue, date_system: DateSystem) -> Option<f64> {
     match v {
         LiteralValue::Number(n) => Some(*n),
         LiteralValue::Int(i) => Some(*i as f64),
         LiteralValue::Text(s) => s.parse::<f64>().ok(),
         LiteralValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+        LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
+            v.as_serial_number_for(date_system)
+        }
         LiteralValue::Empty => Some(0.0),
         _ => None,
     }
@@ -28,8 +35,11 @@ pub fn text_equal_ci(a: &str, b: &str) -> bool {
 
 /// Compare two values for ordering using lenient numeric coercion first, fallback to case-insensitive text.
 /// Returns Some(ordering) where ordering <0, 0, >0 similar to cmp, or None if incomparable.
-pub fn cmp_for_lookup(a: &LiteralValue, b: &LiteralValue) -> Option<i32> {
-    if let (Some(x), Some(y)) = (value_to_f64_lenient(a), value_to_f64_lenient(b)) {
+pub fn cmp_for_lookup(a: &LiteralValue, b: &LiteralValue, date_system: DateSystem) -> Option<i32> {
+    if let (Some(x), Some(y)) = (
+        value_to_f64_lenient(a, date_system),
+        value_to_f64_lenient(b, date_system),
+    ) {
         if (x - y).abs() < 1e-12 {
             return Some(0);
         }
@@ -62,10 +72,11 @@ enum PreparedTextMatcher {
 pub(crate) struct PreparedLookupMatcher<'a> {
     needle: &'a LiteralValue,
     text: Option<PreparedTextMatcher>,
+    date_system: DateSystem,
 }
 
 impl<'a> PreparedLookupMatcher<'a> {
-    pub(crate) fn new(needle: &'a LiteralValue, wildcard: bool) -> Self {
+    pub(crate) fn new(needle: &'a LiteralValue, wildcard: bool, date_system: DateSystem) -> Self {
         let text = match needle {
             LiteralValue::Text(s) => {
                 let folded = s.to_lowercase();
@@ -81,7 +92,11 @@ impl<'a> PreparedLookupMatcher<'a> {
             }
             _ => None,
         };
-        Self { needle, text }
+        Self {
+            needle,
+            text,
+            date_system,
+        }
     }
 
     pub(crate) fn matches(&self, candidate: &LiteralValue) -> bool {
@@ -97,7 +112,7 @@ impl<'a> PreparedLookupMatcher<'a> {
                 let folded_candidate = candidate_text.to_lowercase();
                 compiled.matches_folded(&folded_candidate)
             }
-            _ => cmp_for_lookup(self.needle, candidate)
+            _ => cmp_for_lookup(self.needle, candidate, self.date_system)
                 .map(|o| o == 0)
                 .unwrap_or(false),
         }
@@ -109,22 +124,112 @@ pub fn equals_maybe_wildcard(
     pattern: &LiteralValue,
     candidate: &LiteralValue,
     wildcard: bool,
+    date_system: DateSystem,
 ) -> bool {
-    PreparedLookupMatcher::new(pattern, wildcard).matches(candidate)
+    PreparedLookupMatcher::new(pattern, wildcard, date_system).matches(candidate)
+}
+
+/// Whether Excel's approximate search visits `value` when looking for `needle`.
+///
+/// The legacy approximate lookups (`MATCH` with `match_type` 1/-1,
+/// `VLOOKUP`/`HLOOKUP` with `range_lookup` TRUE) consider only entries in the
+/// needle's comparable value set. A blank cell, or an incomparable entry such
+/// as a text header sitting above a column of numbers, is skipped: it is neither
+/// out-of-order data nor a matchable position. Errors are handled separately
+/// and propagate rather than being classified as skippable.
+pub fn is_searchable_for_approximate(
+    value: &LiteralValue,
+    needle: &LiteralValue,
+    date_system: DateSystem,
+) -> bool {
+    !matches!(value, LiteralValue::Empty) && cmp_for_lookup(value, needle, date_system).is_some()
+}
+
+/// A lookup vector projected onto the entries an approximate search visits.
+///
+/// Positions are only materialized when something is actually skipped, so the
+/// common case — a vector that is entirely in the needle's class — borrows the
+/// original slice and allocates nothing. Indices returned by a search over this
+/// projection are mapped back with [`SearchedVector::original_position`],
+/// because Excel counts the answer from the top of the *original* range.
+pub struct SearchedVector<'a> {
+    values: &'a [LiteralValue],
+    positions: Option<Vec<usize>>,
+    date_system: DateSystem,
+}
+
+impl<'a> SearchedVector<'a> {
+    pub fn new(
+        values: &'a [LiteralValue],
+        needle: &LiteralValue,
+        date_system: DateSystem,
+    ) -> Result<Self, ExcelError> {
+        let first_skipped = values
+            .iter()
+            .position(|v| !is_searchable_for_approximate(v, needle, date_system));
+        let positions = first_skipped.map(|skip| {
+            let mut positions: Vec<usize> = (0..skip).collect();
+            positions.extend(
+                ((skip + 1)..values.len())
+                    .filter(|&i| is_searchable_for_approximate(&values[i], needle, date_system)),
+            );
+            positions
+        });
+        Ok(Self {
+            values,
+            positions,
+            date_system,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.positions {
+            Some(positions) => positions.len(),
+            None => self.values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, index: usize) -> &'a LiteralValue {
+        &self.values[self.original_position(index)]
+    }
+
+    /// Map an index in this projection back to its row in the original range.
+    pub fn original_position(&self, index: usize) -> usize {
+        match &self.positions {
+            Some(positions) => positions[index],
+            None => index,
+        }
+    }
+
+    pub fn is_sorted_ascending(&self) -> bool {
+        (1..self.len()).all(|i| {
+            cmp_for_lookup(self.get(i - 1), self.get(i), self.date_system).is_some_and(|c| c <= 0)
+        })
+    }
+
+    pub fn is_sorted_descending(&self) -> bool {
+        (1..self.len()).all(|i| {
+            cmp_for_lookup(self.get(i - 1), self.get(i), self.date_system).is_some_and(|c| c >= 0)
+        })
+    }
 }
 
 /// Detect ascending sort (strict or equal allowed) for slice according to cmp_for_lookup.
-pub fn is_sorted_ascending(values: &[LiteralValue]) -> bool {
+pub fn is_sorted_ascending(values: &[LiteralValue], date_system: DateSystem) -> bool {
     values
         .windows(2)
-        .all(|w| cmp_for_lookup(&w[0], &w[1]).is_some_and(|c| c <= 0))
+        .all(|w| cmp_for_lookup(&w[0], &w[1], date_system).is_some_and(|c| c <= 0))
 }
 
 /// Detect descending sort (strict or equal allowed).
-pub fn is_sorted_descending(values: &[LiteralValue]) -> bool {
+pub fn is_sorted_descending(values: &[LiteralValue], date_system: DateSystem) -> bool {
     values
         .windows(2)
-        .all(|w| cmp_for_lookup(&w[0], &w[1]).is_some_and(|c| c >= 0))
+        .all(|w| cmp_for_lookup(&w[0], &w[1], date_system).is_some_and(|c| c >= 0))
 }
 
 /// Approximate mode selection (ascending):
@@ -134,23 +239,28 @@ pub fn approximate_select_ascending(
     values: &[LiteralValue],
     needle: &LiteralValue,
     mode: i32,
+    date_system: DateSystem,
 ) -> Option<usize> {
     if values.is_empty() {
         return None;
     }
-    let needle_num = value_to_f64_lenient(needle);
+    let needle_num = value_to_f64_lenient(needle, date_system);
     match mode {
         -1 => {
             // exact or next smaller (our XLOOKUP -1 semantics) -> largest <= needle
             let mut best: Option<usize> = None;
             for (i, v) in values.iter().enumerate() {
-                if cmp_for_lookup(v, needle).map(|c| c == 0).unwrap_or(false) {
+                if cmp_for_lookup(v, needle, date_system)
+                    .map(|c| c == 0)
+                    .unwrap_or(false)
+                {
                     return Some(i);
                 }
-                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(v))
+                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(v, date_system))
                     && vv <= nn
                     && best.is_none_or(|b| {
-                        value_to_f64_lenient(&values[b]).unwrap_or(f64::NEG_INFINITY) < vv
+                        value_to_f64_lenient(&values[b], date_system).unwrap_or(f64::NEG_INFINITY)
+                            < vv
                     })
                 {
                     best = Some(i);
@@ -162,13 +272,16 @@ pub fn approximate_select_ascending(
             // exact or next larger -> smallest >= needle
             let mut best: Option<usize> = None;
             for (i, v) in values.iter().enumerate() {
-                if cmp_for_lookup(v, needle).map(|c| c == 0).unwrap_or(false) {
+                if cmp_for_lookup(v, needle, date_system)
+                    .map(|c| c == 0)
+                    .unwrap_or(false)
+                {
                     return Some(i);
                 }
-                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(v))
+                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(v, date_system))
                     && vv >= nn
                     && best.is_none_or(|b| {
-                        value_to_f64_lenient(&values[b]).unwrap_or(f64::INFINITY) > vv
+                        value_to_f64_lenient(&values[b], date_system).unwrap_or(f64::INFINITY) > vv
                     })
                 {
                     best = Some(i);
@@ -181,8 +294,11 @@ pub fn approximate_select_ascending(
 }
 
 /// Validate ascending sort for approximate selection; return #N/A if unsorted.
-pub fn guard_sorted_ascending(values: &[LiteralValue]) -> Result<(), ExcelError> {
-    if !is_sorted_ascending(values) {
+pub fn guard_sorted_ascending(
+    values: &[LiteralValue],
+    date_system: DateSystem,
+) -> Result<(), ExcelError> {
+    if !is_sorted_ascending(values, date_system) {
         return Err(ExcelError::new(ExcelErrorKind::Na));
     }
     Ok(())
@@ -264,7 +380,7 @@ impl CompiledWildcardPattern {
     fn matches_folded_chars(&self, text: &[char]) -> bool {
         let mut ti = 0usize;
         let mut si = 0usize;
-        let mut bt: Vec<(usize, usize)> = Vec::new();
+        let mut star_retry: Option<(usize, usize)> = None;
         loop {
             if ti == self.tokens.len() {
                 if si == text.len() {
@@ -274,7 +390,7 @@ impl CompiledWildcardPattern {
                 match &self.tokens[ti] {
                     WildcardToken::AnySeq => {
                         ti += 1;
-                        bt.push((ti - 1, si + 1));
+                        star_retry = Some((ti, si));
                         continue;
                     }
                     WildcardToken::AnyChar => {
@@ -294,11 +410,12 @@ impl CompiledWildcardPattern {
                     }
                 }
             }
-            if let Some((star_tok, new_si)) = bt.pop()
-                && new_si <= text.len()
+            if let Some((resume_ti, consumed_to)) = star_retry.as_mut()
+                && *consumed_to < text.len()
             {
-                ti = star_tok + 1;
-                si = new_si;
+                *consumed_to += 1;
+                ti = *resume_ti;
+                si = *consumed_to;
                 continue;
             }
             return false;
@@ -319,8 +436,9 @@ pub fn find_exact_index(
     values: &[LiteralValue],
     needle: &LiteralValue,
     wildcard: bool,
+    date_system: DateSystem,
 ) -> Option<usize> {
-    let matcher = PreparedLookupMatcher::new(needle, wildcard);
+    let matcher = PreparedLookupMatcher::new(needle, wildcard, date_system);
     for (i, v) in values.iter().enumerate() {
         if matcher.matches(v) {
             return Some(i);
@@ -335,6 +453,7 @@ pub fn find_exact_index_in_view(
     view: &RangeView<'_>,
     needle: &LiteralValue,
     wildcard: bool,
+    date_system: DateSystem,
 ) -> Result<Option<usize>, ExcelError> {
     let (rows, cols) = view.dims();
     let vertical = if cols == 1 {
@@ -353,6 +472,15 @@ pub fn find_exact_index_in_view(
         LiteralValue::Boolean(b) => find_exact_boolean_in_view(view, *b, vertical),
         LiteralValue::Empty => find_exact_empty_in_view(view, vertical),
         LiteralValue::Error(e) => Err(e.clone()),
+        // A temporal needle searches the numeric lane by serial: the arrow
+        // store keeps dates and times as serials under a temporal type tag,
+        // so an exact lookup for a date must not fall through to "no match".
+        LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
+            match needle.as_serial_number_for(date_system) {
+                Some(serial) => find_exact_number_in_view(view, serial, vertical),
+                None => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -633,11 +761,11 @@ mod tests {
         let wildcard = LiteralValue::Text("ив?н*".into());
 
         assert_eq!(
-            find_exact_index_in_view(&view, &exact, false).unwrap(),
+            find_exact_index_in_view(&view, &exact, false, DateSystem::Excel1900).unwrap(),
             Some(1)
         );
         assert_eq!(
-            find_exact_index_in_view(&view, &wildcard, true).unwrap(),
+            find_exact_index_in_view(&view, &wildcard, true, DateSystem::Excel1900).unwrap(),
             Some(1)
         );
     }
@@ -664,11 +792,11 @@ mod tests {
         let wildcard = LiteralValue::Text("ив?н*".into());
 
         assert_eq!(
-            find_exact_index_in_view(&view, &exact, false).unwrap(),
+            find_exact_index_in_view(&view, &exact, false, DateSystem::Excel1900).unwrap(),
             Some(1)
         );
         assert_eq!(
-            find_exact_index_in_view(&view, &wildcard, true).unwrap(),
+            find_exact_index_in_view(&view, &wildcard, true, DateSystem::Excel1900).unwrap(),
             Some(1)
         );
     }
@@ -678,6 +806,46 @@ mod tests {
         assert!(wildcard_pattern_match("?", "😀"));
         assert!(wildcard_pattern_match("??", "😀x"));
         assert!(!wildcard_pattern_match("?", "😀x"));
+    }
+
+    #[test]
+    fn wildcard_pattern_match_retries_stars_without_branching() {
+        // oracle: lo-verified
+        let cases = [
+            ("*", "", true),
+            ("*", "bravo", true),
+            ("br*", "bravo", true),
+            ("*avo", "bravo", true),
+            ("a**b***d", "abcbd", true),
+            ("a*?d", "abcbd", true),
+            ("*b*d", "abcbd", true),
+            ("*b*d", "abcbx", false),
+            ("~*", "*", true),
+            ("~?", "?", true),
+            ("~~", "~", true),
+            ("a~**~?", "a*middle?", true),
+            ("ив?н*", "ИВАНОВИЧ", true),
+        ];
+
+        for (pattern, text, expected) in cases {
+            assert_eq!(
+                wildcard_pattern_match(pattern, text),
+                expected,
+                "pattern={pattern:?}, text={text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_pattern_match_pathological_shape_completes_fast() {
+        let text = "a".repeat(250_000);
+        let start = Instant::now();
+        assert!(!wildcard_pattern_match("*a*a*a*a*a*b", &text));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "wildcard retry became pathologically slow: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -691,8 +859,14 @@ mod tests {
         let exact = LiteralValue::Text("иван".into());
         let wildcard = LiteralValue::Text("ив?н*".into());
 
-        assert_eq!(find_exact_index(&values, &exact, false), Some(1));
-        assert_eq!(find_exact_index(&values, &wildcard, true), Some(1));
+        assert_eq!(
+            find_exact_index(&values, &exact, false, DateSystem::Excel1900),
+            Some(1)
+        );
+        assert_eq!(
+            find_exact_index(&values, &wildcard, true, DateSystem::Excel1900),
+            Some(1)
+        );
     }
 
     #[test]
@@ -716,7 +890,12 @@ mod tests {
         for _ in 0..iters {
             let mut out = None;
             for (i, value) in values.iter().enumerate() {
-                if equals_maybe_wildcard(&exact_needle, black_box(value), false) {
+                if equals_maybe_wildcard(
+                    &exact_needle,
+                    black_box(value),
+                    false,
+                    DateSystem::Excel1900,
+                ) {
                     out = Some(i);
                     break;
                 }
@@ -727,7 +906,12 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..iters {
-            black_box(find_exact_index(black_box(&values), &exact_needle, false));
+            black_box(find_exact_index(
+                black_box(&values),
+                &exact_needle,
+                false,
+                DateSystem::Excel1900,
+            ));
         }
         let opt_exact = start.elapsed();
 
@@ -735,7 +919,12 @@ mod tests {
         for _ in 0..iters {
             let mut out = None;
             for (i, value) in values.iter().enumerate() {
-                if equals_maybe_wildcard(&wildcard_needle, black_box(value), true) {
+                if equals_maybe_wildcard(
+                    &wildcard_needle,
+                    black_box(value),
+                    true,
+                    DateSystem::Excel1900,
+                ) {
                     out = Some(i);
                     break;
                 }
@@ -746,7 +935,12 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..iters {
-            black_box(find_exact_index(black_box(&values), &wildcard_needle, true));
+            black_box(find_exact_index(
+                black_box(&values),
+                &wildcard_needle,
+                true,
+                DateSystem::Excel1900,
+            ));
         }
         let opt_wildcard = start.elapsed();
 
@@ -800,7 +994,15 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..iters {
-            black_box(find_exact_index_in_view(&view, black_box(&exact_needle), false).unwrap());
+            black_box(
+                find_exact_index_in_view(
+                    &view,
+                    black_box(&exact_needle),
+                    false,
+                    DateSystem::Excel1900,
+                )
+                .unwrap(),
+            );
         }
         let opt_exact = start.elapsed();
 
@@ -812,7 +1014,15 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..iters {
-            black_box(find_exact_index_in_view(&view, black_box(&wildcard_needle), true).unwrap());
+            black_box(
+                find_exact_index_in_view(
+                    &view,
+                    black_box(&wildcard_needle),
+                    true,
+                    DateSystem::Excel1900,
+                )
+                .unwrap(),
+            );
         }
         let opt_wildcard = start.elapsed();
 
