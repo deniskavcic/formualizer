@@ -58,7 +58,9 @@ impl<'a, R: EvaluationContext> DynamicRefCollector<'a, R> {
 
         let mut out = self.collected.lock().unwrap();
         for u in index.vertices_in_col_range(sc0, ec0) {
-            let row0 = self.engine.graph.vertex_coord(u).row();
+            let Some(row0) = self.engine.graph.vertex_grid_addr(u).map(|addr| addr.row()) else {
+                continue;
+            };
             if row0 < sr0 || row0 > er0 {
                 continue;
             }
@@ -218,6 +220,35 @@ impl<'a, R: EvaluationContext> EvaluationContext for DynamicRefCollector<'a, R> 
         self.engine.cancellation_token()
     }
 
+    fn resolve_cell_format(
+        &self,
+        sheet: Option<&str>,
+        row: u32,
+        col: u32,
+        current_sheet: &str,
+    ) -> Option<crate::format::FormatId> {
+        self.engine
+            .resolve_cell_format(sheet, row, col, current_sheet)
+    }
+
+    fn format_class(
+        &self,
+        format: crate::format::FormatId,
+    ) -> Option<formualizer_common::numfmt::FormatClass> {
+        self.engine.format_class(format)
+    }
+
+    fn record_cell_derived_format(
+        &self,
+        sheet: &str,
+        row: u32,
+        col: u32,
+        format: Option<crate::format::FormatId>,
+    ) {
+        self.engine
+            .record_cell_derived_format(sheet, row, col, format)
+    }
+
     fn resolve_range_view<'c>(
         &'c self,
         reference: &ReferenceType,
@@ -325,7 +356,9 @@ impl RangeVirtualDepProvider {
                     let sc0 = sc.saturating_sub(1);
                     let ec0 = ec.saturating_sub(1);
                     for u in index.vertices_in_col_range(sc0, ec0) {
-                        let pc = engine.graph.vertex_coord(u);
+                        let Some(pc) = engine.graph.vertex_grid_addr(u) else {
+                            continue;
+                        };
                         let row0 = pc.row();
                         if row0 < sr0 || row0 > er0 {
                             continue;

@@ -172,9 +172,25 @@ fn data_ref_to_overlay(value: &DataRef<'_>) -> Option<OverlayValue> {
         DataRef::Int(i) => Some(OverlayValue::Number(*i as f64)),
         DataRef::Bool(b) => Some(OverlayValue::Boolean(*b)),
         DataRef::Error(e) => Some(OverlayValue::Error(CalamineAdapter::calamine_error_code(e))),
-        DataRef::DateTime(dt) => Some(OverlayValue::DateTime(dt.as_f64())),
+        DataRef::DateTime(dt) => Some(OverlayValue::Number(dt.as_f64())),
         DataRef::DateTimeIso(s) => Some(OverlayValue::Text(Arc::from(s.as_str()))),
         DataRef::DurationIso(s) => Some(OverlayValue::Text(Arc::from(s.as_str()))),
+    }
+}
+
+fn data_ref_format(value: &DataRef<'_>) -> Option<formualizer_eval::format::FormatId> {
+    match value {
+        DataRef::DateTime(dt) if dt.is_duration() => {
+            Some(formualizer_eval::format::FormatId::DURATION)
+        }
+        DataRef::DateTime(dt) if (0.0..1.0).contains(&dt.as_f64()) => {
+            Some(formualizer_eval::format::FormatId::TIME)
+        }
+        DataRef::DateTime(dt) if dt.as_f64().fract().abs() > f64::EPSILON => {
+            Some(formualizer_eval::format::FormatId::DATETIME)
+        }
+        DataRef::DateTime(_) => Some(formualizer_eval::format::FormatId::DATE),
+        _ => None,
     }
 }
 
@@ -557,6 +573,7 @@ impl CalamineAdapter {
             if let Some(arrow_sheet) = sparse.as_mut() {
                 if let Some(value) = data_ref_to_overlay(&record.value) {
                     arrow_sheet.set_sparse_overlay_value(row, col, value);
+                    arrow_sheet.set_sparse_overlay_format(row, col, data_ref_format(&record.value));
                     values_handed_to_engine += 1;
                 }
                 continue;
@@ -593,6 +610,7 @@ impl CalamineAdapter {
                 }
                 if let Some(value) = data_ref_to_overlay(&record.value) {
                     arrow_sheet.set_sparse_overlay_value(row, col, value);
+                    arrow_sheet.set_sparse_overlay_format(row, col, data_ref_format(&record.value));
                     values_handed_to_engine += 1;
                 }
                 sparse = Some(arrow_sheet);
@@ -1498,13 +1516,19 @@ where
         if debug {
             eprintln!("[fz][load] calamine: {} sheets", names.len());
         }
-        for n in &names {
-            #[cfg(feature = "tracing")]
-            let _span_sheet = tracing::info_span!("io_load_sheet", sheet = n.as_str()).entered();
-            engine
-                .add_sheet(n.as_str())
-                .map_err(|e| calamine::Error::Io(std::io::Error::other(e.to_string())))?;
-        }
+        // Single seam for sheet registration across every backend: folds the
+        // engine's seeded default sheet into the file's first sheet on a fresh
+        // engine and rejects duplicate names (#332). Registration is one bulk
+        // call now, so the former per-sheet `io_load_sheet` span becomes one
+        // `io_load_sheets` span over the whole registration.
+        #[cfg(feature = "tracing")]
+        let _span_sheets =
+            tracing::info_span!("io_load_sheets", sheet_count = names.len()).entered();
+        engine
+            .adopt_file_sheets(names.iter().map(|n| n.as_str()))
+            .map_err(|e| calamine::Error::Io(std::io::Error::other(e.to_string())))?;
+        #[cfg(feature = "tracing")]
+        drop(_span_sheets);
 
         let prev_index_mode = engine.config.sheet_index_mode;
         engine.set_sheet_index_mode(formualizer_eval::engine::SheetIndexMode::Lazy);
@@ -1811,5 +1835,30 @@ mod tests {
             data_ref_to_overlay(&DataRef::Error(error)),
             Some(OverlayValue::Error(8))
         ));
+    }
+
+    #[test]
+    fn dateish_backend_signal_maps_date_time_datetime_and_duration() {
+        use calamine::{ExcelDateTime, ExcelDateTimeType};
+        use formualizer_eval::format::FormatId;
+
+        let date = DataRef::DateTime(ExcelDateTime::new(
+            45_583.0,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
+        let time = DataRef::DateTime(ExcelDateTime::new(0.5, ExcelDateTimeType::DateTime, false));
+        let datetime = DataRef::DateTime(ExcelDateTime::new(
+            45_583.5,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
+        let duration =
+            DataRef::DateTime(ExcelDateTime::new(1.5, ExcelDateTimeType::TimeDelta, false));
+
+        assert_eq!(data_ref_format(&date), Some(FormatId::DATE));
+        assert_eq!(data_ref_format(&time), Some(FormatId::TIME));
+        assert_eq!(data_ref_format(&datetime), Some(FormatId::DATETIME));
+        assert_eq!(data_ref_format(&duration), Some(FormatId::DURATION));
     }
 }

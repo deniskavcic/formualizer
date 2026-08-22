@@ -1,4 +1,5 @@
 use crate::SheetId;
+use crate::engine::addr::GridAddr;
 use crate::engine::graph::DependencyGraph;
 use crate::engine::graph::editor::reference_adjuster::{
     MoveReferenceAdjuster, ReferenceAdjuster, ReferenceContext, RelativeReferenceAdjuster,
@@ -7,7 +8,6 @@ use crate::engine::graph::editor::reference_adjuster::{
 use crate::engine::named_range::{NameScope, NamedDefinition};
 use crate::engine::{ChangeEvent, ChangeLogger, VertexId, VertexKind};
 use crate::reference::{CellRef, Coord};
-use formualizer_common::Coord as AbsCoord;
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::ASTNode;
 use rustc_hash::FxHashMap;
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Metadata for creating a new vertex
 #[derive(Debug, Clone)]
 pub struct VertexMeta {
-    pub coord: AbsCoord,
+    pub coord: GridAddr,
     pub sheet_id: SheetId,
     pub kind: VertexKind,
     pub flags: u8,
@@ -25,7 +25,7 @@ pub struct VertexMeta {
 impl VertexMeta {
     pub fn new(row: u32, col: u32, sheet_id: SheetId, kind: VertexKind) -> Self {
         Self {
-            coord: AbsCoord::new(row, col),
+            coord: GridAddr::new(row, col),
             sheet_id,
             kind,
             flags: 0,
@@ -52,7 +52,7 @@ impl VertexMeta {
 #[derive(Debug, Clone)]
 pub struct VertexMetaPatch {
     pub kind: Option<VertexKind>,
-    pub coord: Option<AbsCoord>,
+    pub coord: Option<GridAddr>,
     pub dirty: Option<bool>,
     pub volatile: Option<bool>,
 }
@@ -87,6 +87,8 @@ pub struct ShiftSummary {
     pub vertices_deleted: Vec<VertexId>,
     pub references_adjusted: usize,
     pub formulas_updated: usize,
+    #[cfg(test)]
+    pub(crate) structural_dependents_dirtied: Vec<VertexId>,
 }
 
 /// Summary of range operations
@@ -213,6 +215,7 @@ pub struct VertexEditor<'g> {
     graph: &'g mut DependencyGraph,
     change_logger: Option<&'g mut dyn ChangeLogger>,
     spill_value_reader: Option<&'g dyn SpillValueReader>,
+    structural_occupancy: Option<crate::engine::graph::StructuralOccupancy>,
     batch_mode: bool,
 }
 
@@ -223,8 +226,25 @@ impl<'g> VertexEditor<'g> {
             graph,
             change_logger: None,
             spill_value_reader: None,
+            structural_occupancy: None,
             batch_mode: false,
         }
+    }
+
+    /// Supply the conservative union of graph and Arrow occupancy for structural edits.
+    pub(crate) fn with_structural_occupancy(
+        mut self,
+        occupancy: crate::engine::graph::StructuralOccupancy,
+    ) -> Self {
+        self.structural_occupancy = Some(occupancy);
+        self
+    }
+
+    pub(crate) fn set_structural_occupancy(
+        &mut self,
+        occupancy: crate::engine::graph::StructuralOccupancy,
+    ) {
+        self.structural_occupancy = Some(occupancy);
     }
 
     /// Create a new vertex editor with change logging
@@ -236,6 +256,7 @@ impl<'g> VertexEditor<'g> {
             graph,
             change_logger: Some(logger as &'g mut dyn ChangeLogger),
             spill_value_reader: None,
+            structural_occupancy: None,
             batch_mode: false,
         }
     }
@@ -250,6 +271,7 @@ impl<'g> VertexEditor<'g> {
             graph,
             change_logger: Some(logger as &'g mut dyn ChangeLogger),
             spill_value_reader: Some(spill_value_reader),
+            structural_occupancy: None,
             batch_mode: false,
         }
     }
@@ -663,7 +685,7 @@ impl<'g> VertexEditor<'g> {
             kind,
             flags,
         ) = if self.has_logger() {
-            let coord = self.graph.get_coord(id);
+            let coord = self.graph.get_grid_addr(id);
             let sheet_id = self.graph.get_sheet_id(id);
             let kind = self.graph.get_vertex_kind(id);
             // flags not publicly exposed; set to 0 for now (future: expose getter)
@@ -673,7 +695,7 @@ impl<'g> VertexEditor<'g> {
                 self.get_formula_ast(id),
                 self.graph.get_dependencies(id), // outgoing deps
                 dependents.clone(),              // captured earlier
-                Some(coord),
+                coord,
                 Some(sheet_id),
                 Some(kind),
                 Some(flags),
@@ -738,11 +760,24 @@ impl<'g> VertexEditor<'g> {
     }
 
     /// Move a vertex to a new position
-    pub fn move_vertex(&mut self, id: VertexId, new_coord: AbsCoord) -> Result<(), EditorError> {
+    ///
+    /// The `GridAddr` argument says where the vertex is going, but the `VertexId` says
+    /// nothing about whether it is somewhere to begin with. A symbol has no position, so
+    /// moving one is meaningless: it is what turned a default-sheet insert into a
+    /// name-hijacked cell (#304). Every in-tree caller iterates `grid_vertices_in_sheet`
+    /// and so cannot reach this, but the method is public, so refuse explicitly.
+    pub fn move_vertex(&mut self, id: VertexId, new_coord: GridAddr) -> Result<(), EditorError> {
         // Check if vertex exists
         if !self.graph.vertex_exists(id) {
             return Err(EditorError::Excel(
                 ExcelError::new(ExcelErrorKind::Ref).with_message("Vertex does not exist"),
+            ));
+        }
+        if self.graph.get_grid_addr(id).is_none() {
+            return Err(EditorError::Excel(
+                ExcelError::new(ExcelErrorKind::Ref).with_message(
+                    "Symbol vertices have no position and cannot be moved onto the grid",
+                ),
             ));
         }
 
@@ -757,10 +792,10 @@ impl<'g> VertexEditor<'g> {
         );
 
         // Update coordinate in store
-        self.graph.set_coord(id, new_coord);
+        self.graph.set_grid_addr(id, new_coord);
 
         // Update edge cache coordinate if needed
-        self.graph.update_edge_coord(id, new_coord);
+        self.graph.update_edge_grid_addr(id, new_coord);
 
         // Update cell mapping
         self.graph
@@ -787,8 +822,16 @@ impl<'g> VertexEditor<'g> {
         let mut summary = MetaUpdateSummary::default();
 
         if let Some(coord) = patch.coord {
-            self.graph.set_coord(id, coord);
-            self.graph.update_edge_coord(id, coord);
+            // Same reasoning as `move_vertex`: a symbol has no position to patch.
+            if self.graph.get_grid_addr(id).is_none() {
+                return Err(EditorError::Excel(
+                    ExcelError::new(ExcelErrorKind::Ref).with_message(
+                        "Symbol vertices have no position and cannot be moved onto the grid",
+                    ),
+                ));
+            }
+            self.graph.set_grid_addr(id, coord);
+            self.graph.update_edge_grid_addr(id, coord);
             summary.coord_changed = true;
         }
 
@@ -879,18 +922,24 @@ impl<'g> VertexEditor<'g> {
         // Begin batch for efficiency
         self.begin_batch();
 
+        let conservative = crate::engine::graph::StructuralOccupancy::conservative();
+        let occupancy = self.structural_occupancy.as_ref().unwrap_or(&conservative);
+        let range_dependents = self.graph.compressed_range_dependents_for_structural_edit(
+            sheet_id,
+            crate::engine::graph::StructuralEdit::InsertRows { before },
+            occupancy,
+        );
+        #[cfg(test)]
+        {
+            summary.structural_dependents_dirtied = range_dependents.clone();
+        }
+        self.graph.mark_dirty_many(&range_dependents);
+
         // 1. Collect vertices to shift (those at or after the insert point)
-        let vertices_to_shift: Vec<(VertexId, AbsCoord)> = self
+        let vertices_to_shift: Vec<(VertexId, GridAddr)> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter_map(|id| {
-                let coord = self.graph.get_coord(id);
-                if coord.row() >= before {
-                    Some((id, coord))
-                } else {
-                    None
-                }
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.row() >= before)
             .collect();
 
         if let Some(logger) = &mut self.change_logger {
@@ -900,7 +949,7 @@ impl<'g> VertexEditor<'g> {
         }
         // 2. Shift vertices down (emit VertexMoved)
         for (id, old_coord) in vertices_to_shift {
-            let new_coord = AbsCoord::new(old_coord.row() + count, old_coord.col());
+            let new_coord = GridAddr::new(old_coord.row() + count, old_coord.col());
             if self.has_logger() {
                 self.log_change(ChangeEvent::VertexMoved {
                     id,
@@ -1003,19 +1052,24 @@ impl<'g> VertexEditor<'g> {
         // 1. Delete vertices in the range
         let vertices_to_delete: Vec<VertexId> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter(|&id| {
-                let coord = self.graph.get_coord(id);
-                coord.row() >= start && coord.row() < start + count
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.row() >= start && coord.row() < start + count)
+            .map(|(id, _)| id)
             .collect();
-        let range_dependents = self
-            .graph
-            .compressed_range_dependents_intersecting_deleted_rows(
-                sheet_id,
+        let conservative = crate::engine::graph::StructuralOccupancy::conservative();
+        let occupancy = self.structural_occupancy.as_ref().unwrap_or(&conservative);
+        let range_dependents = self.graph.compressed_range_dependents_for_structural_edit(
+            sheet_id,
+            crate::engine::graph::StructuralEdit::DeleteRows {
                 start,
-                start.saturating_add(count).saturating_sub(1).max(start),
-            );
+                end: start.saturating_add(count).saturating_sub(1).max(start),
+            },
+            occupancy,
+        );
+        #[cfg(test)]
+        {
+            summary.structural_dependents_dirtied = range_dependents.clone();
+        }
         self.graph.mark_dirty_many(&range_dependents);
 
         for id in vertices_to_delete {
@@ -1023,21 +1077,14 @@ impl<'g> VertexEditor<'g> {
             summary.vertices_deleted.push(id);
         }
         // 2. Shift remaining vertices up (emit VertexMoved)
-        let vertices_to_shift: Vec<(VertexId, AbsCoord)> = self
+        let vertices_to_shift: Vec<(VertexId, GridAddr)> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter_map(|id| {
-                let coord = self.graph.get_coord(id);
-                if coord.row() >= start + count {
-                    Some((id, coord))
-                } else {
-                    None
-                }
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.row() >= start + count)
             .collect();
 
         for (id, old_coord) in vertices_to_shift {
-            let new_coord = AbsCoord::new(old_coord.row() - count, old_coord.col());
+            let new_coord = GridAddr::new(old_coord.row() - count, old_coord.col());
             if self.has_logger() {
                 self.log_change(ChangeEvent::VertexMoved {
                     id,
@@ -1131,18 +1178,24 @@ impl<'g> VertexEditor<'g> {
         // Begin batch for efficiency
         self.begin_batch();
 
+        let conservative = crate::engine::graph::StructuralOccupancy::conservative();
+        let occupancy = self.structural_occupancy.as_ref().unwrap_or(&conservative);
+        let range_dependents = self.graph.compressed_range_dependents_for_structural_edit(
+            sheet_id,
+            crate::engine::graph::StructuralEdit::InsertColumns { before },
+            occupancy,
+        );
+        #[cfg(test)]
+        {
+            summary.structural_dependents_dirtied = range_dependents.clone();
+        }
+        self.graph.mark_dirty_many(&range_dependents);
+
         // 1. Collect vertices to shift (those at or after the insert point)
-        let vertices_to_shift: Vec<(VertexId, AbsCoord)> = self
+        let vertices_to_shift: Vec<(VertexId, GridAddr)> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter_map(|id| {
-                let coord = self.graph.get_coord(id);
-                if coord.col() >= before {
-                    Some((id, coord))
-                } else {
-                    None
-                }
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.col() >= before)
             .collect();
 
         if let Some(logger) = &mut self.change_logger {
@@ -1152,7 +1205,7 @@ impl<'g> VertexEditor<'g> {
         }
         // 2. Shift vertices right (emit VertexMoved)
         for (id, old_coord) in vertices_to_shift {
-            let new_coord = AbsCoord::new(old_coord.row(), old_coord.col() + count);
+            let new_coord = GridAddr::new(old_coord.row(), old_coord.col() + count);
             if self.has_logger() {
                 self.log_change(ChangeEvent::VertexMoved {
                     id,
@@ -1255,19 +1308,24 @@ impl<'g> VertexEditor<'g> {
         // 1. Delete vertices in the range
         let vertices_to_delete: Vec<VertexId> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter(|&id| {
-                let coord = self.graph.get_coord(id);
-                coord.col() >= start && coord.col() < start + count
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.col() >= start && coord.col() < start + count)
+            .map(|(id, _)| id)
             .collect();
-        let range_dependents = self
-            .graph
-            .compressed_range_dependents_intersecting_deleted_columns(
-                sheet_id,
+        let conservative = crate::engine::graph::StructuralOccupancy::conservative();
+        let occupancy = self.structural_occupancy.as_ref().unwrap_or(&conservative);
+        let range_dependents = self.graph.compressed_range_dependents_for_structural_edit(
+            sheet_id,
+            crate::engine::graph::StructuralEdit::DeleteColumns {
                 start,
-                start.saturating_add(count).saturating_sub(1).max(start),
-            );
+                end: start.saturating_add(count).saturating_sub(1).max(start),
+            },
+            occupancy,
+        );
+        #[cfg(test)]
+        {
+            summary.structural_dependents_dirtied = range_dependents.clone();
+        }
         self.graph.mark_dirty_many(&range_dependents);
 
         for id in vertices_to_delete {
@@ -1275,21 +1333,14 @@ impl<'g> VertexEditor<'g> {
             summary.vertices_deleted.push(id);
         }
         // 2. Shift remaining vertices left (emit VertexMoved)
-        let vertices_to_shift: Vec<(VertexId, AbsCoord)> = self
+        let vertices_to_shift: Vec<(VertexId, GridAddr)> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter_map(|id| {
-                let coord = self.graph.get_coord(id);
-                if coord.col() >= start + count {
-                    Some((id, coord))
-                } else {
-                    None
-                }
-            })
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| coord.col() >= start + count)
             .collect();
 
         for (id, old_coord) in vertices_to_shift {
-            let new_coord = AbsCoord::new(old_coord.row(), old_coord.col() - count);
+            let new_coord = GridAddr::new(old_coord.row(), old_coord.col() - count);
             if self.has_logger() {
                 self.log_change(ChangeEvent::VertexMoved {
                     id,
@@ -1685,13 +1736,13 @@ impl<'g> VertexEditor<'g> {
         // Collect vertices in range
         let vertices_in_range: Vec<_> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter(|&id| {
-                let coord = self.graph.get_coord(id);
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| {
                 let row = coord.row();
                 let col = coord.col();
                 row >= start_row && row <= end_row && col >= start_col && col <= end_col
             })
+            .map(|(id, _)| id)
             .collect();
 
         for id in vertices_in_range {
@@ -1725,9 +1776,8 @@ impl<'g> VertexEditor<'g> {
         // Collect source data
         let vertices_in_range: Vec<_> = self
             .graph
-            .vertices_in_sheet(sheet_id)
-            .filter(|&id| {
-                let coord = self.graph.get_coord(id);
+            .grid_vertices_in_sheet(sheet_id)
+            .filter(|(_, coord)| {
                 let row = coord.row();
                 let col = coord.col();
                 row >= from_start_row
@@ -1737,8 +1787,7 @@ impl<'g> VertexEditor<'g> {
             })
             .collect();
 
-        for id in vertices_in_range {
-            let coord = self.graph.get_coord(id);
+        for (id, coord) in vertices_in_range {
             let row = coord.row();
             let col = coord.col();
 
@@ -2347,10 +2396,10 @@ mod tests {
         let vertex_id = editor.add_vertex(meta);
 
         // Move vertex returns Result
-        assert!(editor.move_vertex(vertex_id, AbsCoord::new(8, 12)).is_ok());
+        assert!(editor.move_vertex(vertex_id, GridAddr::new(8, 12)).is_ok());
 
         // Moving to same position should work
-        assert!(editor.move_vertex(vertex_id, AbsCoord::new(8, 12)).is_ok());
+        assert!(editor.move_vertex(vertex_id, GridAddr::new(8, 12)).is_ok());
     }
 
     #[test]

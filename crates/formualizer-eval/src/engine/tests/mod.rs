@@ -1,4 +1,5 @@
 mod active_span_gate_audit;
+mod adopt_file_sheets;
 mod arena_debug;
 mod ast_edge_invariant;
 mod cancellation;
@@ -10,6 +11,7 @@ mod cross_sheet_named_range_first_cell;
 mod cycle_detection;
 mod database_blank_semantics;
 mod date_arithmetic_negative_serial;
+mod default_sheet_resolution;
 mod deferred_dirty;
 mod demand_driven;
 mod dependency;
@@ -70,6 +72,7 @@ mod engine_atomic_actions_618;
 mod index_unbounded_ranges;
 mod infinite_ranges;
 mod issue_306_structural_delete_dirty;
+mod issue_313_insert_invalidation;
 mod spill_atomic;
 mod spill_basic;
 mod spill_config_defaults;
@@ -193,3 +196,5 @@ mod short_circuit_dispatch;
 
 mod approximate_lookup_ignored_entries;
 mod temporal_lookup_semantics;
+
+mod format_channel_t1;

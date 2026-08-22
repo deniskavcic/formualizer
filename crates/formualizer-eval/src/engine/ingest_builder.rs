@@ -77,12 +77,14 @@ impl SheetStage {
 
 fn range_key_from_shared(
     range: &crate::reference::SharedRangeRef<'static>,
+    sheet_reg: &crate::engine::sheet_registry::SheetRegistry,
     current_sheet: SheetId,
 ) -> RangeKey {
-    let sheet = match range.sheet {
-        crate::reference::SharedSheetLocator::Id(id) => id,
-        _ => current_sheet,
-    };
+    // `Current` is the sheet the formula lives on. An unresolvable sheet name
+    // falls back to it so the range still produces a key.
+    let sheet = sheet_reg
+        .resolve_locator(&range.sheet, current_sheet)
+        .unwrap_or(current_sheet);
     match (
         range.start_row,
         range.start_col,
@@ -117,6 +119,7 @@ fn range_key_from_shared(
 }
 
 fn dependency_plan_from_rows(
+    sheet_reg: &crate::engine::sheet_registry::SheetRegistry,
     sheet_id: SheetId,
     rows: &[(u32, u32, DependencyPlanRow)],
 ) -> DependencyPlan {
@@ -192,7 +195,7 @@ fn dependency_plan_from_rows(
             row_plan
                 .range_deps
                 .iter()
-                .map(|range| range_key_from_shared(range, sheet_id))
+                .map(|range| range_key_from_shared(range, sheet_reg, sheet_id))
                 .collect(),
         );
         let mut names = row_plan.resolved_named_refs.clone();
@@ -365,7 +368,7 @@ impl<'g> BulkIngestBuilder<'g> {
         // Materialize per-sheet to keep caches warm and reduce cross-sheet churn
         // Accumulate a flat adjacency for a single-shot CSR build
         let mut edges_adj: Vec<(u32, Vec<u32>)> = Vec::new();
-        let mut coord_accum: Vec<AbsCoord> = Vec::new();
+        let mut coord_accum: Vec<crate::engine::addr::VertexAddr> = Vec::new();
         let mut id_accum: Vec<u32> = Vec::new();
         for (_sid, mut stage) in self.sheets.drain() {
             let t_sheet0 = Instant::now();
@@ -462,7 +465,7 @@ impl<'g> BulkIngestBuilder<'g> {
                         .zip(prepared.into_iter())
                         .map(|(formula, (_, plan))| (formula.row, formula.col, plan))
                         .collect();
-                    let plan = dependency_plan_from_rows(stage.id, &row_plans);
+                    let plan = dependency_plan_from_rows(self.g.sheet_reg(), stage.id, &row_plans);
                     edges_adj.reserve(plan.formula_targets.len());
                     t_plan_ms += tp0.elapsed().as_millis();
                     n_targets += plan.formula_targets.len();
@@ -663,7 +666,7 @@ impl<'g> BulkIngestBuilder<'g> {
                     }
                     let t_coords0 = Instant::now();
                     for vid in self.g.iter_vertex_ids() {
-                        coord_accum.push(self.g.vertex_coord(vid));
+                        coord_accum.push(self.g.vertex_addr(vid));
                         id_accum.push(vid.0);
                     }
                     t_coords_ms = t_coords0.elapsed().as_millis();
