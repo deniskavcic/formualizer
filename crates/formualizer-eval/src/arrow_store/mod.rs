@@ -3936,23 +3936,6 @@ impl ArrowSheet {
         )
     }
 
-    /// Fold every overlay into base Arrow lanes so a snapshot can dump raw arrays.
-    pub fn force_compact_all(&mut self) {
-        let ncols = self.columns.len();
-        for col in 0..ncols {
-            let dense = self.columns[col].chunks.len();
-            for ch in 0..dense {
-                let _ = self.maybe_compact_chunk(col, ch, 0, 1);
-                let _ = self.compact_computed_overlay_chunk(col, ch);
-            }
-            let sparse: Vec<usize> = self.columns[col].sparse_chunks.keys().copied().collect();
-            for ch in sparse {
-                let _ = self.maybe_compact_chunk(col, ch, 0, 1);
-                let _ = self.compact_computed_overlay_chunk(col, ch);
-            }
-        }
-    }
-
     /// Rebuild a sheet from already-materialized chunks (checkpoint hydrate).
     pub fn from_prebuilt(
         name: &str,
