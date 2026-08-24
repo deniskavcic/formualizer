@@ -1,6 +1,6 @@
 use super::utils::ARG_ANY_ONE;
 use crate::args::ArgSchema;
-use crate::function::Function;
+use crate::function::{Function, FunctionResolution, resolution_to_reference};
 use crate::function_contract::FunctionDependencyContract;
 use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::{ExcelError, LiteralValue};
@@ -469,7 +469,7 @@ pub struct IfsFn; // IFS(cond1, val1, cond2, val2, ...)
 /// Variadic: true
 /// Signature: IFS(arg1...: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE, SHORT_CIRCUIT
+/// Caps: PURE, RETURNS_REFERENCE, SHORT_CIRCUIT
 /// [formualizer-docgen:schema:end]
 impl Function for IfsFn {
     fn propagate_format(
@@ -479,7 +479,7 @@ impl Function for IfsFn {
         result.format_id()
     }
 
-    func_caps!(PURE, SHORT_CIRCUIT, MAY_SPILL);
+    func_caps!(PURE, SHORT_CIRCUIT, RETURNS_REFERENCE, MAY_SPILL);
     fn name(&self) -> &'static str {
         "IFS"
     }
@@ -491,6 +491,21 @@ impl Function for IfsFn {
     }
     fn arg_schema(&self) -> &'static [ArgSchema] {
         &ARG_ANY_ONE[..]
+    }
+    fn eval_reference<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Option<Result<formualizer_parse::parser::ReferenceType, ExcelError>> {
+        resolution_to_reference(resolve_ifs_reference_or_value(args, ctx))
+    }
+    fn resolve_reference_or_value<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+        _value_fallback: &dyn Fn() -> Result<crate::traits::CalcValue<'b>, ExcelError>,
+    ) -> Result<FunctionResolution<'b>, ExcelError> {
+        resolve_ifs_reference_or_value(args, ctx)
     }
     fn eval<'a, 'b, 'c>(
         &self,
@@ -526,6 +541,49 @@ impl Function for IfsFn {
             ExcelError::new_na(),
         )))
     }
+}
+
+fn resolve_selected_non_if<'b>(
+    selected: &ArgumentHandle<'_, 'b>,
+    _ctx: &dyn FunctionContext<'b>,
+) -> Result<FunctionResolution<'b>, ExcelError> {
+    selected.resolve_reference_or_value()
+}
+
+fn value_error_resolution<'b>() -> FunctionResolution<'b> {
+    FunctionResolution::Value(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+        ExcelError::new_value(),
+    )))
+}
+
+fn resolve_ifs_reference_or_value<'b>(
+    args: &[ArgumentHandle<'_, 'b>],
+    ctx: &dyn FunctionContext<'b>,
+) -> Result<FunctionResolution<'b>, ExcelError> {
+    if args.len() < 2 || !args.len().is_multiple_of(2) {
+        return Ok(value_error_resolution());
+    }
+    for pair in args.chunks(2) {
+        let condition = pair[0].value()?.into_literal();
+        let selected = match condition {
+            LiteralValue::Boolean(value) => value,
+            LiteralValue::Number(value) => value != 0.0,
+            LiteralValue::Int(value) => value != 0,
+            LiteralValue::Empty => false,
+            LiteralValue::Error(error) => {
+                return Ok(FunctionResolution::Value(crate::traits::CalcValue::Scalar(
+                    LiteralValue::Error(error),
+                )));
+            }
+            _ => return Ok(value_error_resolution()),
+        };
+        if selected {
+            return resolve_selected_non_if(&pair[1], ctx);
+        }
+    }
+    Ok(FunctionResolution::Value(crate::traits::CalcValue::Scalar(
+        LiteralValue::Error(ExcelError::new_na()),
+    )))
 }
 
 /// Returns the result corresponding to the first matching candidate value.
@@ -679,7 +737,7 @@ mod tests {
     use super::*;
     use crate::test_workbook::TestWorkbook;
     use crate::traits::ArgumentHandle;
-    use formualizer_common::LiteralValue;
+    use formualizer_common::{ExcelErrorKind, LiteralValue};
     use formualizer_parse::parser::{ASTNode, ASTNodeType};
 
     fn interp(wb: &TestWorkbook) -> crate::interpreter::Interpreter<'_> {
@@ -1049,6 +1107,53 @@ mod tests {
                 .unwrap()
                 .into_literal(),
             LiteralValue::Int(42)
+        );
+    }
+
+    #[test]
+    fn ifs_and_switch_propagate_condition_error() {
+        let wb = TestWorkbook::new()
+            .with_function(std::sync::Arc::new(IfsFn))
+            .with_function(std::sync::Arc::new(SwitchFn));
+        let ctx = interp(&wb);
+        let error = ASTNode::new(
+            ASTNodeType::Literal(LiteralValue::Error(ExcelError::new_na())),
+            None,
+        );
+        let one = ASTNode::new(ASTNodeType::Literal(LiteralValue::Int(1)), None);
+        let two = ASTNode::new(ASTNodeType::Literal(LiteralValue::Int(2)), None);
+
+        let ifs = ctx.context.get_function("", "IFS").unwrap();
+        let ifs_value = ifs
+            .dispatch(
+                &[
+                    ArgumentHandle::new(&error, &ctx),
+                    ArgumentHandle::new(&one, &ctx),
+                ],
+                &ctx.function_context(None),
+            )
+            .unwrap()
+            .into_literal();
+        assert!(
+            matches!(ifs_value, LiteralValue::Error(ref e) if e.kind == ExcelErrorKind::Na),
+            "IFS must preserve the condition error, got {ifs_value:?}"
+        );
+
+        let switch = ctx.context.get_function("", "SWITCH").unwrap();
+        let switch_value = switch
+            .dispatch(
+                &[
+                    ArgumentHandle::new(&error, &ctx),
+                    ArgumentHandle::new(&one, &ctx),
+                    ArgumentHandle::new(&two, &ctx),
+                ],
+                &ctx.function_context(None),
+            )
+            .unwrap()
+            .into_literal();
+        assert!(
+            matches!(switch_value, LiteralValue::Error(ref e) if e.kind == ExcelErrorKind::Na),
+            "SWITCH must preserve the expression error, got {switch_value:?}"
         );
     }
 }
