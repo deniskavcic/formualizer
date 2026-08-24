@@ -5431,6 +5431,126 @@ where
         &mut self.arrow_sheets
     }
 
+    /// Sparse `(row, col, source)` list of formulas on `sheet` (1-based).
+    ///
+    /// Used by the grid-v3 checkpoint sidecar — formula text is not in Arrow.
+    pub fn export_formula_sources(&self, sheet: &str) -> Vec<(u32, u32, String)> {
+        let Some(want) = self.graph.sheet_id(sheet) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for vid in self.graph.iter_vertex_ids() {
+            if self.graph.get_formula_id(vid).is_none() {
+                continue;
+            }
+            let Some(cell) = self.graph.get_cell_ref_for_vertex(vid) else {
+                continue;
+            };
+            if cell.sheet_id != want {
+                continue;
+            }
+            let Some(coord) = self.graph.vertex_grid_addr(vid) else {
+                continue;
+            };
+            let row = coord.row() + 1;
+            let col = coord.col() + 1;
+            if let Some((Some(ast), _)) = self.get_cell(sheet, row, col) {
+                out.push((row, col, formualizer_parse::pretty::canonical_formula(&ast)));
+            }
+        }
+        out
+    }
+
+    /// Formula cells plus precedent ranges, quantized to `(col, chunk_idx)`.
+    ///
+    /// `whole_sheet` is set when a precedent is open-ended on columns or
+    /// otherwise unquantizable (cross-sheet). Used by grid-v3's cold-edit
+    /// guard mask.
+    pub fn export_formula_guard(
+        &self,
+        sheet: &str,
+        chunk_rows: u32,
+        nrows: u32,
+        ncols: u32,
+    ) -> (bool, Vec<(u32, u32)>) {
+        let Some(want) = self.graph.sheet_id(sheet) else {
+            return (false, Vec::new());
+        };
+        let chunk_rows = chunk_rows.max(1);
+        let mut whole_sheet = false;
+        let mut chunks = std::collections::BTreeSet::new();
+        let mark = |row: u32, col: u32, chunks: &mut std::collections::BTreeSet<(u32, u32)>| {
+            chunks.insert((col, row / chunk_rows));
+        };
+        for vid in self.graph.iter_vertex_ids() {
+            if self.graph.get_formula_id(vid).is_none() {
+                continue;
+            }
+            let Some(cell) = self.graph.get_cell_ref_for_vertex(vid) else {
+                continue;
+            };
+            if cell.sheet_id != want {
+                continue;
+            }
+            let Some(coord) = self.graph.vertex_grid_addr(vid) else {
+                continue;
+            };
+            mark(coord.row(), coord.col(), &mut chunks);
+
+            for dep in self.graph.get_dependencies(vid) {
+                let Some(dcell) = self.graph.get_cell_ref_for_vertex(dep) else {
+                    continue;
+                };
+                if dcell.sheet_id != want {
+                    whole_sheet = true;
+                    continue;
+                }
+                let Some(dc) = self.graph.vertex_grid_addr(dep) else {
+                    continue;
+                };
+                mark(dc.row(), dc.col(), &mut chunks);
+            }
+
+            if let Some(ranges) = self.graph.formula_range_dependencies(vid) {
+                for range in ranges {
+                    let sheet_ok = match &range.sheet {
+                        crate::reference::SharedSheetLocator::Current => true,
+                        crate::reference::SharedSheetLocator::Id(id) => *id == want,
+                        crate::reference::SharedSheetLocator::Name(name) => {
+                            self.graph.sheet_id(name).is_some_and(|id| id == want)
+                        }
+                    };
+                    if !sheet_ok {
+                        whole_sheet = true;
+                        continue;
+                    }
+                    let (Some(sc), Some(ec)) = (range.start_col, range.end_col) else {
+                        whole_sheet = true;
+                        continue;
+                    };
+                    let start_col = sc.index.min(ec.index);
+                    let end_col = sc.index.max(ec.index);
+                    if ncols > 0 && end_col.saturating_sub(start_col) + 1 >= ncols {
+                        whole_sheet = true;
+                        continue;
+                    }
+                    let (start_row, end_row) = match (range.start_row, range.end_row) {
+                        (Some(sr), Some(er)) => (sr.index.min(er.index), sr.index.max(er.index)),
+                        _ => (0, nrows.saturating_sub(1)),
+                    };
+                    let start_ch = start_row / chunk_rows;
+                    let end_ch = end_row / chunk_rows;
+                    for col in start_col..=end_col {
+                        for ch in start_ch..=end_ch {
+                            chunks.insert((col, ch));
+                        }
+                    }
+                }
+            }
+        }
+        (whole_sheet, chunks.into_iter().collect())
+    }
+
     pub fn has_staged_formulas(&self) -> bool {
         !self.staged_formulas.is_empty()
     }

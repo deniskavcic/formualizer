@@ -148,6 +148,44 @@ pub struct ColumnChunk {
 }
 
 impl ColumnChunk {
+    /// Build a compacted chunk from lane arrays. Overlays start empty.
+    pub fn from_lanes(
+        type_tag: Arc<UInt8Array>,
+        numbers: Option<Arc<Float64Array>>,
+        booleans: Option<Arc<BooleanArray>>,
+        text: Option<ArrayRef>,
+        errors: Option<Arc<UInt8Array>>,
+    ) -> Self {
+        let len = type_tag.len();
+        let non_null_num = numbers.as_ref().map(|a| len - a.null_count()).unwrap_or(0);
+        let non_null_bool = booleans.as_ref().map(|a| len - a.null_count()).unwrap_or(0);
+        let non_null_text = text.as_ref().map(|a| len - a.null_count()).unwrap_or(0);
+        let non_null_err = errors.as_ref().map(|a| len - a.null_count()).unwrap_or(0);
+        Self {
+            numbers,
+            booleans,
+            text,
+            errors,
+            type_tag,
+            formula_id: None,
+            format: None,
+            meta: ColumnChunkMeta {
+                len,
+                non_null_num,
+                non_null_bool,
+                non_null_text,
+                non_null_err,
+            },
+            lazy_null_numbers: OnceCell::new(),
+            lazy_null_booleans: OnceCell::new(),
+            lazy_null_text: OnceCell::new(),
+            lazy_null_errors: OnceCell::new(),
+            lowered_text: OnceCell::new(),
+            overlay: Overlay::new(),
+            computed_overlay: Overlay::new(),
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.type_tag.len()
@@ -3889,29 +3927,50 @@ impl ArrowSheet {
     }
 
     fn make_empty_chunk(len: usize) -> ColumnChunk {
-        ColumnChunk {
-            numbers: None,
-            booleans: None,
-            text: None,
-            errors: None,
-            type_tag: Arc::new(UInt8Array::from(vec![TypeTag::Empty as u8; len])),
-            formula_id: None,
-            format: None,
-            meta: ColumnChunkMeta {
-                len,
-                non_null_num: 0,
-                non_null_bool: 0,
-                non_null_text: 0,
-                non_null_err: 0,
-            },
-            lazy_null_numbers: OnceCell::new(),
-            lazy_null_booleans: OnceCell::new(),
-            lazy_null_text: OnceCell::new(),
-            lazy_null_errors: OnceCell::new(),
-            lowered_text: OnceCell::new(),
-            overlay: Overlay::new(),
-            computed_overlay: Overlay::new(),
+        ColumnChunk::from_lanes(
+            Arc::new(UInt8Array::from(vec![TypeTag::Empty as u8; len])),
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Fold every overlay into base Arrow lanes so a snapshot can dump raw arrays.
+    pub fn force_compact_all(&mut self) {
+        let ncols = self.columns.len();
+        for col in 0..ncols {
+            let dense = self.columns[col].chunks.len();
+            for ch in 0..dense {
+                let _ = self.maybe_compact_chunk(col, ch, 0, 1);
+                let _ = self.compact_computed_overlay_chunk(col, ch);
+            }
+            let sparse: Vec<usize> = self.columns[col].sparse_chunks.keys().copied().collect();
+            for ch in sparse {
+                let _ = self.maybe_compact_chunk(col, ch, 0, 1);
+                let _ = self.compact_computed_overlay_chunk(col, ch);
+            }
         }
+    }
+
+    /// Rebuild a sheet from already-materialized chunks (checkpoint hydrate).
+    pub fn from_prebuilt(
+        name: &str,
+        date_system: crate::engine::DateSystem,
+        nrows: u32,
+        chunk_rows: usize,
+        columns: Vec<ArrowColumn>,
+    ) -> Self {
+        let mut sheet = Self {
+            name: Arc::from(name),
+            date_system,
+            columns,
+            nrows,
+            chunk_starts: Vec::new(),
+            chunk_rows: chunk_rows.max(1),
+        };
+        sheet.recompute_chunk_starts();
+        sheet
     }
 
     fn slice_chunk(ch: &ColumnChunk, off: usize, len: usize) -> ColumnChunk {
