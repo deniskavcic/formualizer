@@ -2056,7 +2056,7 @@ impl Overlay {
     }
 
     #[inline]
-    fn has_formats(&self) -> bool {
+    pub(crate) fn has_formats(&self) -> bool {
         !self.format_points.is_empty()
     }
 
@@ -2069,6 +2069,26 @@ impl Overlay {
             None => {
                 self.format_points.remove(&off);
             }
+        }
+    }
+
+    /// Clear computed formats in `[start, end)`. Empty lanes return in O(1);
+    /// populated lanes pay for existing formatted entries, not range length.
+    pub(crate) fn clear_format_range(&mut self, start: usize, end: usize) {
+        if self.format_points.is_empty() || start >= end {
+            return;
+        }
+        self.format_points
+            .retain(|off, _| *off < start || *off >= end);
+    }
+
+    /// Clear exact computed-format offsets for a sparse computed write.
+    pub(crate) fn clear_format_offsets(&mut self, offsets: &[usize]) {
+        if self.format_points.is_empty() {
+            return;
+        }
+        for off in offsets {
+            self.format_points.remove(off);
         }
     }
 
@@ -3715,7 +3735,12 @@ impl ArrowSheet {
         let ch = self.columns.get(abs_col)?.chunk(ch_idx)?;
         ch.overlay
             .get_format(in_off)
-            .or_else(|| ch.format.as_ref().map(|runs| runs.get(in_off)))
+            .or_else(|| {
+                ch.format
+                    .as_ref()
+                    .map(|runs| runs.get(in_off))
+                    .filter(|id| *id != FormatId::GENERAL)
+            })
             .or_else(|| ch.computed_overlay.get_format(in_off))
             .filter(|id| *id != FormatId::GENERAL)
     }
