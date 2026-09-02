@@ -124,6 +124,7 @@ mod eval_flush_recalc_probe;
 mod formula_edit_propagation;
 mod formula_error_propagation;
 mod formula_overlay_writeback;
+mod formula_plane_array_result_backstop;
 mod formula_plane_coverage_pinning;
 mod formula_plane_cycle_member_exclusion;
 mod formula_plane_demotion_correctness;
@@ -199,7 +200,7 @@ mod scc_runtime_property;
 mod short_circuit_dispatch;
 
 mod approximate_lookup_ignored_entries;
-mod temporal_lookup_semantics;
-
+mod cell_hyperlink_sheet;
 mod format_channel_t1;
+mod temporal_lookup_semantics;
 mod xlookup_excel_parity;
