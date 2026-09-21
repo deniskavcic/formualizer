@@ -68,6 +68,8 @@ __all__ = [
     "parse",
     "parse_formula",
     "recalculate_file",
+    "recalculate_xlsx_bytes",
+    "recalculate_xlsx_file",
     "tokenize",
     "DependencyStateUnavailableError",
     "ExcelEvaluationError",
@@ -298,6 +300,17 @@ class CycleTelemetry:
     def nan_converged(self) -> builtins.int:
         r"""
         Identical-bit NaN comparisons treated as converged (spec §6 NaN rule).
+        """
+    @property
+    def reused_sccs(self) -> builtins.int:
+        r"""
+        Retained exactly-converged SCCs that had no dirty member at the start of this request and were
+        therefore served without a re-run (#368).
+        """
+    @property
+    def reused_scc_members(self) -> builtins.int:
+        r"""
+        Members of the SCCs counted in `reused_sccs`.
         """
     @property
     def elapsed_ms(self) -> builtins.int:
@@ -2149,6 +2162,17 @@ def recalculate_file(path: builtins.str, output: typing.Optional[builtins.str] =
     Note:
         Formula text is preserved. Cached-value typing follows the active
         `umya-spreadsheet` implementation.
+    """
+
+def recalculate_xlsx_bytes(data: bytes, *, error_location_limit: typing.Optional[builtins.int] = None) -> typing.Any:
+    r"""
+    Recalculate XLSX formula caches in memory without rewriting unrelated package parts.
+    Returns a dictionary with output ``bytes``, a ``summary``, and formula/cache/worksheet counts.
+    """
+
+def recalculate_xlsx_file(path: builtins.str, output: typing.Optional[builtins.str] = None, *, error_location_limit: typing.Optional[builtins.int] = None) -> typing.Any:
+    r"""
+    Recalculate XLSX formula caches from a path using atomic output replacement.
     """
 
 def tokenize(formula: builtins.str, dialect: typing.Optional[FormulaDialect] = None) -> Tokenizer:
