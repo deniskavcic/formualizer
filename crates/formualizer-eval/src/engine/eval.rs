@@ -5580,7 +5580,8 @@ where
 
     /// Sparse `(row, col, source)` list of formulas on `sheet` (1-based).
     ///
-    /// Used by the grid-v3 checkpoint sidecar — formula text is not in Arrow.
+    /// INFObySolved: added for grid-v3's checkpoint sidecar (see
+    /// `server/rust/src/sheet/persist`) — formula text is not in Arrow.
     pub fn export_formula_sources(&self, sheet: &str) -> Vec<(u32, u32, String)> {
         let Some(want) = self.graph.sheet_id(sheet) else {
             return Vec::new();
@@ -5613,6 +5614,8 @@ where
     /// `whole_sheet` is set when a precedent is open-ended on columns or
     /// otherwise unquantizable (cross-sheet). Used by grid-v3's cold-edit
     /// guard mask.
+    ///
+    /// INFObySolved: added for `server/rust/src/sheet/persist`.
     pub fn export_formula_guard(
         &self,
         sheet: &str,

@@ -149,6 +149,8 @@ pub struct ColumnChunk {
 
 impl ColumnChunk {
     /// Build a compacted chunk from lane arrays. Overlays start empty.
+    ///
+    /// INFObySolved: added for `server/rust/src/sheet/persist`.
     pub fn from_lanes(
         type_tag: Arc<UInt8Array>,
         numbers: Option<Arc<Float64Array>>,
@@ -3962,6 +3964,8 @@ impl ArrowSheet {
     }
 
     /// Rebuild a sheet from already-materialized chunks (checkpoint hydrate).
+    ///
+    /// INFObySolved: added for `server/rust/src/sheet/persist`.
     pub fn from_prebuilt(
         name: &str,
         date_system: crate::engine::DateSystem,
