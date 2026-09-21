@@ -8,8 +8,12 @@
 
 use core::{fmt, str::FromStr};
 
+// INFObySolved: `wide-rows` re-lays the packing for grid-v3's taller-than-Excel
+// sheets. The module is public so every other copy of the layout (engine
+// `addr.rs`, the `eval.rs` spill guards) derives from it instead of restating
+// Excel's bit widths and silently drifting when the feature is on.
 #[cfg(not(feature = "wide-rows"))]
-mod packing {
+pub mod packing {
     pub const ROW_BITS: u32 = 20;
     pub const COL_BITS: u32 = 14;
     pub const ROW_MAX: u32 = (1 << ROW_BITS) - 1;
@@ -25,8 +29,9 @@ mod packing {
 }
 
 /// Bit layout (low → high): [anchor: 2] [col: 14] [row: 32] [reserved: 16]
+// INFObySolved: the `wide-rows` arm. See the marker on the default arm above.
 #[cfg(feature = "wide-rows")]
-mod packing {
+pub mod packing {
     pub const ROW_BITS: u32 = 32;
     pub const COL_BITS: u32 = 14;
     pub const ROW_MAX: u32 = u32::MAX;

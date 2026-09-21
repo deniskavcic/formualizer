@@ -66,6 +66,8 @@ pub type SheetId = u16;
 pub struct PackedSheetCell(u64);
 
 impl PackedSheetCell {
+    // INFObySolved: `wide-rows` widens the row field for grid-v3's
+    // taller-than-Excel sheets. Sibling gate of `coord::packing`.
     #[cfg(not(feature = "wide-rows"))]
     const ROW_BITS: u32 = 20;
     #[cfg(feature = "wide-rows")]

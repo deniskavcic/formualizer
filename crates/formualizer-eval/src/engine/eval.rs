@@ -18374,11 +18374,12 @@ where
                             return Ok(spill_val);
                         }
                         // Bounds check to avoid out-of-range writes (align to AbsCoord capacity)
-                        const PACKED_MAX_ROW: u32 = 1_048_575; // 20-bit max
-                        const PACKED_MAX_COL: u32 = 16_383; // 14-bit max
+                        // INFObySolved: read the capacity from the gated packing so
+                        // `wide-rows` spills past Excel's row cap instead of `#SPILL!`.
+                        use formualizer_common::coord::packing::{COL_MAX, ROW_MAX};
                         let end_row = anchor.coord.row().saturating_add(h).saturating_sub(1);
                         let end_col = anchor.coord.col().saturating_add(w).saturating_sub(1);
-                        if end_row > PACKED_MAX_ROW || end_col > PACKED_MAX_COL {
+                        if end_row > ROW_MAX || end_col > COL_MAX {
                             self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
                             let spill_err = ExcelError::new(ExcelErrorKind::Spill)
                                 .with_message("Spill exceeds sheet bounds")
@@ -23948,11 +23949,12 @@ where
         }
 
         // Bounds check to avoid out-of-range writes (align to AbsCoord capacity)
-        const PACKED_MAX_ROW: u32 = 1_048_575; // 20-bit max
-        const PACKED_MAX_COL: u32 = 16_383; // 14-bit max
+        // INFObySolved: read the capacity from the gated packing so `wide-rows`
+        // spills past Excel's row cap instead of `#SPILL!`.
+        use formualizer_common::coord::packing::{COL_MAX, ROW_MAX};
         let end_row = anchor.coord.row().saturating_add(h).saturating_sub(1);
         let end_col = anchor.coord.col().saturating_add(w).saturating_sub(1);
-        if end_row > PACKED_MAX_ROW || end_col > PACKED_MAX_COL {
+        if end_row > ROW_MAX || end_col > COL_MAX {
             self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
             let spill_err = ExcelError::new(ExcelErrorKind::Spill)
                 .with_message("Spill exceeds sheet bounds")
@@ -26856,11 +26858,12 @@ where
         }
 
         // Bounds check to avoid out-of-range writes (align to AbsCoord capacity).
-        const PACKED_MAX_ROW: u32 = 1_048_575;
-        const PACKED_MAX_COL: u32 = 16_383;
+        // INFObySolved: read the capacity from the gated packing so `wide-rows`
+        // spills past Excel's row cap instead of `#SPILL!`.
+        use formualizer_common::coord::packing::{COL_MAX, ROW_MAX};
         let end_row = anchor.coord.row().saturating_add(h).saturating_sub(1);
         let end_col = anchor.coord.col().saturating_add(w).saturating_sub(1);
-        if end_row > PACKED_MAX_ROW || end_col > PACKED_MAX_COL {
+        if end_row > ROW_MAX || end_col > COL_MAX {
             return self.plan_spill_error_effects(vertex_id, "Spill exceeds sheet bounds", h, w);
         }
 
