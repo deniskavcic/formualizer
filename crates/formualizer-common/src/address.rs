@@ -55,19 +55,20 @@ pub type SheetId = u16;
 /// dependency attribution, UI invalidation, FFI).
 ///
 /// Bit layout (low → high):
-/// - `row0`: 20 bits (0..=1_048_575) by default; 32 bits with `wide-rows`
+/// - `row0`: 20 bits (0..=1_048_575)
 /// - `col0`: 14 bits (0..=16_383)
 /// - `sheet_id`: 16 bits
 ///
 /// This packing is a public contract. Do not change the bit layout without a major
-/// version bump (or an explicit Cargo feature such as `wide-rows`).
+/// version bump.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackedSheetCell(u64);
 
 impl PackedSheetCell {
-    // INFObySolved: `wide-rows` widens the row field for grid-v3's
-    // taller-than-Excel sheets. Sibling gate of `coord::packing`.
+    // INFObySolved: `wide-rows` widens the row field to 32 bits for grid-v3's
+    // taller-than-Excel sheets (an explicit Cargo feature, not a silent layout
+    // change; the layout above is the default). Sibling gate of `coord::packing`.
     #[cfg(not(feature = "wide-rows"))]
     const ROW_BITS: u32 = 20;
     #[cfg(feature = "wide-rows")]

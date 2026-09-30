@@ -21,26 +21,28 @@
 //! # Representation
 //!
 //! [`VertexAddr`] is exactly 8 bytes — the same width as the [`AbsCoord`] it replaces. The
-//! coordinate encoding leaves a reserved high field (`RESERVED_HIGH_MASK`) that is always
-//! zero for a real position, with `u64::MAX` already reserved as the invalid sentinel. Its
-//! width follows the packing layout in `formualizer-common` — the top 20 bits by default,
-//! the top 16 under the `wide-rows` feature. Symbols live in that niche: bit 63 set with the
-//! rest of the reserved field clear. The edge coordinate arrays
+//! coordinate encoding saturates rows (20 bits) and columns (14 bits) at Excel's limits but
+//! leaves the top 20 bits (`0xFFFFF000_00000000`) reserved and always zero for a real
+//! position, with `u64::MAX` already reserved as the invalid sentinel. Symbols live in that
+//! niche: bit 63 set with the rest of the reserved field clear. The edge coordinate arrays
 //! are `Vec` parallel to adjacency, so widening them to `Option<AbsCoord>` (16 bytes) would
 //! double hot memory; using the existing niche keeps the address free.
 
-// INFObySolved: derive the reserved field from formualizer-common's gated
-// packing instead of restating Excel's 20-bit layout. Under `wide-rows` the row
-// field reaches bit 48, so a local literal silently misreads rows >= 2^28 as
-// neither grid nor symbol.
 use formualizer_common::Coord as AbsCoord;
-use formualizer_common::coord::packing::RESERVED_HIGH_MASK;
 use std::fmt;
+
+/// The reserved high field of a packed coordinate. Zero for every real `(row, col)`.
+// INFObySolved: derived from formualizer-common's gated packing instead of
+// restating Excel's 20-bit layout. Under `wide-rows` the row field reaches bit
+// 48 (the reserved field is the top 16 bits), so a local literal silently
+// misreads rows >= 2^28 as neither grid nor symbol.
+const RESERVED_HIGH_MASK: u64 = formualizer_common::coord::packing::RESERVED_HIGH_MASK;
 
 /// Tag written into the reserved high field to mark a symbol address.
 const SYMBOL_TAG: u64 = 1 << 63;
 
-/// Payload area available to a symbol address (`u32` indices fit trivially).
+/// Payload area available to a symbol address (44 bits; `u32` indices fit trivially).
+// INFObySolved: 48 bits under `wide-rows`.
 const SYMBOL_PAYLOAD_MASK: u64 = !RESERVED_HIGH_MASK;
 
 /// A real grid position.
@@ -258,7 +260,7 @@ mod tests {
     use super::*;
     // INFObySolved: derive the corners from the gated packing so these tests
     // assert the real layout under `wide-rows` instead of Excel's constants.
-    use formualizer_common::coord::packing::{COL_MAX, ROW_MAX};
+    use formualizer_common::coord::packing::{COL_MAX, GRID_ROW_MAX, ROW_MAX};
 
     #[test]
     fn vertex_addr_is_eight_bytes() {
@@ -303,11 +305,9 @@ mod tests {
 
     #[test]
     fn symbols_order_after_every_grid_position() {
-        // INFObySolved: `order_key` reserves row `u32::MAX` for symbols, so under
-        // `wide-rows` (`ROW_MAX == u32::MAX`) the last grid row that still sorts
-        // before them is one below the cap. Under the default layout this is
-        // `1_048_575` — the exact corner this test always used.
-        let last_cell = VertexAddr::grid(GridAddr::new(ROW_MAX.min(u32::MAX - 1), COL_MAX));
+        // INFObySolved: `order_key` reserves row `u32::MAX` for symbols, so the
+        // last row that sorts before them is `GRID_ROW_MAX` (1_048_575 by default).
+        let last_cell = VertexAddr::grid(GridAddr::new(GRID_ROW_MAX, COL_MAX));
         let first_symbol = VertexAddr::symbol(SymbolAddr::new(0));
         assert!(last_cell.order_key() < first_symbol.order_key());
     }

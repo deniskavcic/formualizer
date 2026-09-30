@@ -393,6 +393,9 @@ struct StreamWorksheetOptions {
 struct FormulaStaging {
     parse_cache: rustc_hash::FxHashMap<String, Option<formualizer_eval::engine::AstNodeId>>,
     formulas: Vec<FormulaIngestRecord>,
+    /// Load-time family grouping: relative copies of the formula above
+    /// (or to the left) are staged as members and never interned.
+    grouper: formualizer_eval::engine::FormulaFamilyGrouper,
     observed: usize,
     handed_to_engine: usize,
 }
@@ -404,6 +407,7 @@ impl FormulaStaging {
         Self {
             parse_cache,
             formulas: Vec::new(),
+            grouper: formualizer_eval::engine::FormulaFamilyGrouper::new(),
             observed: 0,
             handed_to_engine: 0,
         }
@@ -460,6 +464,53 @@ fn data_ref_to_literal(value: &DataRef<'_>, date_system: DateSystem) -> Option<L
         ),
         DataRef::DateTimeIso(s) => Some(LiteralValue::Text(s.clone())),
         DataRef::DurationIso(s) => Some(LiteralValue::Text(s.clone())),
+    }
+}
+
+/// Values of a sheet in sparse ingest mode, applied in batches. The sheet then
+/// grows once per batch rather than once per row: row-by-row growth re-copies
+/// the last chunk of every column, which is quadratic in the chunk size on
+/// files without `<dimension>` (every row past the declared one grows the
+/// sheet). Cells are applied in arrival order, so the result is the same.
+#[derive(Default)]
+struct SparseValueBatch {
+    cells: Vec<(
+        usize,
+        usize,
+        OverlayValue,
+        Option<formualizer_eval::format::FormatId>,
+    )>,
+    max_row: usize,
+}
+
+impl SparseValueBatch {
+    const LIMIT: usize = 1 << 16;
+
+    fn push(
+        &mut self,
+        sheet: &mut formualizer_eval::arrow_store::ArrowSheet,
+        row: usize,
+        col: usize,
+        value: OverlayValue,
+        format: Option<formualizer_eval::format::FormatId>,
+    ) {
+        self.max_row = self.max_row.max(row);
+        self.cells.push((row, col, value, format));
+        if self.cells.len() >= Self::LIMIT {
+            self.flush(sheet);
+        }
+    }
+
+    fn flush(&mut self, sheet: &mut formualizer_eval::arrow_store::ArrowSheet) {
+        if self.cells.is_empty() {
+            return;
+        }
+        sheet.ensure_row_capacity(self.max_row + 1);
+        for (row, col, value, format) in self.cells.drain(..) {
+            sheet.set_sparse_overlay_value(row, col, value);
+            sheet.set_sparse_overlay_format(row, col, format);
+        }
+        self.max_row = 0;
     }
 }
 
@@ -612,7 +663,7 @@ impl CalamineAdapter {
             return false;
         };
         let Ok(relocated) =
-            formualizer_eval::formula_plane::structural::relocate_ast_for_template_placement(
+            formualizer_eval::engine::template::relocate::relocate_ast_for_template_placement(
                 &anchor,
                 i64::from(coord0.row) - i64::from(family.anchor_coord0.row),
                 i64::from(coord0.col) - i64::from(family.anchor_coord0.col),
@@ -646,8 +697,16 @@ impl CalamineAdapter {
             engine.stage_formula_text(sheet, excel_row, excel_col, normalized);
             staging.handed_to_engine += 1;
         } else {
-            let ast_id = if let Some(cached) = staging.parse_cache.get(&normalized) {
-                *cached
+            let record = if let Some(cached) = staging.parse_cache.get(&normalized) {
+                cached.map(|ast_id| {
+                    engine.note_staged_formula(&mut staging.grouper, excel_row, excel_col, ast_id);
+                    FormulaIngestRecord::new(
+                        excel_row,
+                        excel_col,
+                        ast_id,
+                        Some(Arc::<str>::from(normalized.as_str())),
+                    )
+                })
             } else {
                 let parsed = match formualizer_parse::parser::parse(&normalized) {
                     Ok(parsed) => Some(parsed),
@@ -663,17 +722,38 @@ impl CalamineAdapter {
                             calamine::Error::Io(std::io::Error::other(error.to_string()))
                         })?,
                 };
-                let ast_id = parsed.as_ref().map(|ast| engine.intern_formula_ast(ast));
-                staging.parse_cache.insert(normalized.clone(), ast_id);
-                ast_id
+                match parsed {
+                    Some(ast) => {
+                        let record = engine.stage_formula_ast(
+                            &mut staging.grouper,
+                            excel_row,
+                            excel_col,
+                            &ast,
+                            None,
+                        );
+                        // A member's text is not worth caching: relative
+                        // copies do not repeat their text.
+                        if record.is_family_member() {
+                            Some(record)
+                        } else {
+                            let ast_id = record.ast_id;
+                            staging.parse_cache.insert(normalized.clone(), Some(ast_id));
+                            Some(FormulaIngestRecord::new(
+                                excel_row,
+                                excel_col,
+                                ast_id,
+                                Some(Arc::<str>::from(normalized)),
+                            ))
+                        }
+                    }
+                    None => {
+                        staging.parse_cache.insert(normalized, None);
+                        None
+                    }
+                }
             };
-            if let Some(ast_id) = ast_id {
-                staging.formulas.push(FormulaIngestRecord::new(
-                    excel_row,
-                    excel_col,
-                    ast_id,
-                    Some(Arc::<str>::from(normalized)),
-                ));
+            if let Some(record) = record {
+                staging.formulas.push(record);
                 staging.handed_to_engine += 1;
             }
         }
@@ -736,6 +816,7 @@ impl CalamineAdapter {
             )
         });
         let mut used_sparse_fallback = force_sparse_from_start;
+        let mut sparse_values = SparseValueBatch::default();
         let mut max_row_seen = 0usize;
         let mut max_col_seen = 0usize;
         let mut value_cells_observed = 0usize;
@@ -848,7 +929,7 @@ impl CalamineAdapter {
                         });
                         let family = SourceFamilyId {
                             sheet_instance,
-                            source_index: shared_index,
+                            source_index: shared_source_index(shared_index),
                         };
                         if let Some(coordinates) = deferred_source_coordinates.as_mut() {
                             coordinates.push((coord0, Some(family)));
@@ -874,7 +955,7 @@ impl CalamineAdapter {
                         shared_formula_tags += 1;
                         let family = SourceFamilyId {
                             sheet_instance,
-                            source_index: shared_index,
+                            source_index: shared_source_index(shared_index),
                         };
                         if let Some(coordinates) = deferred_source_coordinates.as_mut() {
                             coordinates.push((coord0, Some(family)));
@@ -943,8 +1024,13 @@ impl CalamineAdapter {
 
             if let Some(arrow_sheet) = sparse.as_mut() {
                 if let Some(value) = data_ref_to_overlay(&record.value) {
-                    arrow_sheet.set_sparse_overlay_value(row, col, value);
-                    arrow_sheet.set_sparse_overlay_format(row, col, data_ref_format(&record.value));
+                    sparse_values.push(
+                        arrow_sheet,
+                        row,
+                        col,
+                        value,
+                        data_ref_format(&record.value),
+                    );
                     values_handed_to_engine += 1;
                 }
                 continue;
@@ -980,8 +1066,13 @@ impl CalamineAdapter {
                     );
                 }
                 if let Some(value) = data_ref_to_overlay(&record.value) {
-                    arrow_sheet.set_sparse_overlay_value(row, col, value);
-                    arrow_sheet.set_sparse_overlay_format(row, col, data_ref_format(&record.value));
+                    sparse_values.push(
+                        &mut arrow_sheet,
+                        row,
+                        col,
+                        value,
+                        data_ref_format(&record.value),
+                    );
                     values_handed_to_engine += 1;
                 }
                 sparse = Some(arrow_sheet);
@@ -1143,7 +1234,7 @@ impl CalamineAdapter {
                             (shadow_relocation_comparator.as_ref(), shared_index)
                         && let Some(family) = compressed_families
                             .iter()
-                            .find(|family| family.source_id.source_index == shared_index)
+                            .find(|family| family.source_id.source_index as usize == shared_index)
                         && !Self::shadow_relocation_matches(comparator, family, coord0, formula)
                     {
                         relocation_mismatches.insert(shared_index);
@@ -1160,7 +1251,7 @@ impl CalamineAdapter {
             )?;
             if !relocation_mismatches.is_empty() {
                 compressed_families.retain(|family| {
-                    !relocation_mismatches.contains(&family.source_id.source_index)
+                    !relocation_mismatches.contains(&(family.source_id.source_index as usize))
                 });
             }
         }
@@ -1185,6 +1276,7 @@ impl CalamineAdapter {
         .map_err(|error| calamine::Error::Io(std::io::Error::other(error.to_string())))?;
 
         let mut arrow_sheet = if let Some(mut arrow_sheet) = sparse {
+            sparse_values.flush(&mut arrow_sheet);
             arrow_sheet.ensure_row_capacity(dims_rows.max(max_row_seen + 1));
             arrow_sheet
         } else {
@@ -1531,7 +1623,11 @@ impl CalamineAdapter {
         // defined-name metadata we need here with a targeted streaming pass over
         // workbook.xml, avoiding a full file String allocation or any sheet XML reparse.
         let mut xml = XmlReader::from_reader(BufReader::new(entry));
-        xml.config_mut().trim_text(true);
+        // Keep text untrimmed: quick-xml splits `'A &amp; B'!$A$1` into text,
+        // entity and text events, and trimming each piece would drop the
+        // spaces around `&` and name a different sheet. `convert_defined_name`
+        // trims the assembled formula once.
+        xml.config_mut().trim_text(false);
 
         let mut out = Vec::new();
         let mut seen: HashSet<(DefinedNameScope, Option<String>, String)> = HashSet::new();
@@ -2216,6 +2312,12 @@ where
         engine.config.range_expansion_limit = prev_range_limit;
         load_result
     }
+}
+
+/// A source shared-formula index as the `u32` a [`SourceFamilyId`] stores
+/// (an xlsx sheet cannot hold 2^32 shared formulas).
+pub(super) fn shared_source_index(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

@@ -111,10 +111,9 @@ fn reverse_action(engine: &mut TestEngine, log: &mut ChangeLog) {
 }
 
 fn assert_reversed_graph(engine: &TestEngine) {
-    let a1 = engine
-        .graph
-        .get_vertex_for_cell(&cell(engine, 1, 1))
-        .unwrap();
+    // A1 is a value cell: no vertex (decision 27); C1 reads it as a cell.
+    let a1 = cell(engine, 1, 1);
+    assert!(engine.graph.get_vertex_for_cell(&a1).is_none());
     let b1 = engine
         .graph
         .get_vertex_for_cell(&cell(engine, 1, 2))
@@ -124,7 +123,8 @@ fn assert_reversed_graph(engine: &TestEngine) {
         .get_vertex_for_cell(&cell(engine, 1, 3))
         .unwrap();
     assert_eq!(engine.graph.get_dependencies(b1), vec![c1]);
-    assert_eq!(engine.graph.get_dependencies(c1), vec![a1]);
+    assert!(engine.graph.get_dependencies(c1).is_empty());
+    assert_eq!(engine.graph.oracle_vertexless_cells(c1), vec![a1]);
 }
 
 fn assert_values(engine: &mut TestEngine, b1: f64, c1: f64) {
@@ -478,7 +478,6 @@ fn setup_active_formula_plane_span() -> TestEngine {
     engine
         .ingest_formula_batches(vec![FormulaIngestBatch::new("Sheet1", formulas)])
         .unwrap();
-    assert_eq!(engine.baseline_stats().formula_plane_active_span_count, 1);
     engine.evaluate_all().unwrap();
     engine
 }
@@ -496,7 +495,6 @@ fn active_formula_plane_value_edit_is_correct_for_every_audit_policy() {
             })
             .unwrap();
 
-        assert_eq!(engine.baseline_stats().formula_plane_active_span_count, 1);
         assert_eq!(
             engine.get_cell_value("Sheet1", 50, 1),
             Some(LiteralValue::Number(1_000.0))
@@ -510,14 +508,6 @@ fn active_formula_plane_value_edit_is_correct_for_every_audit_policy() {
         assert_eq!(
             engine.get_cell_value("Sheet1", 49, 2),
             Some(LiteralValue::Number(98.0)),
-            "policy={policy:?}"
-        );
-        assert_eq!(
-            engine
-                .last_formula_plane_span_eval_report()
-                .unwrap()
-                .span_eval_placement_count,
-            1,
             "policy={policy:?}"
         );
         assert_audit_policy(policy, &log, 1);

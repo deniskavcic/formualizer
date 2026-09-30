@@ -9,13 +9,20 @@ use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType};
 use rustc_hash::FxHashMap;
 use std::{borrow::Cow, sync::Arc};
 
-use crate::engine::arena::ast::SheetKey;
+use crate::engine::arena::ast::{CALL_NODE_NAME, SheetKey};
 use crate::engine::arena::{AstNodeData, AstNodeId, CompactRefType, DataStore};
 use crate::engine::sheet_registry::SheetRegistry;
+use crate::engine::template::canonical::LiteralSlotId;
 use crate::engine::used_extent::{
     ExtentPolicy, OpenRangeBounds, resolve_used_extent_with_fallback,
 };
-use crate::formula_plane::template_canonical::LiteralSlotId;
+
+/// Postfix calls (`LAMBDA(x,x+1)(B1)`) are parsed and stored but not evaluated;
+/// the parsed tree and its arena copy fail the same way.
+fn call_expression_error() -> ExcelError {
+    ExcelError::new(ExcelErrorKind::NImpl)
+        .with_message("Immediate-invocation calls are not yet supported")
+}
 
 pub(crate) fn probe_range_dimensions<C: EvaluationContext + ?Sized>(
     context: &C,
@@ -64,6 +71,15 @@ pub(crate) fn probe_range_dimensions<C: EvaluationContext + ?Sized>(
 #[derive(Clone)]
 pub enum LocalBinding {
     Value(LiteralValue),
+    /// A local bound to a spreadsheet reference expression.
+    ///
+    /// `value` is exactly what [`LocalBinding::Value`] would have carried, so the
+    /// value path is unchanged; `reference` additionally lets a by-ref argument
+    /// slot see the range the local was bound to.
+    ValueWithReference {
+        value: LiteralValue,
+        reference: ReferenceType,
+    },
     Callable(Arc<dyn crate::traits::CustomCallable>),
 }
 
@@ -117,7 +133,14 @@ impl LocalEnv {
 pub(crate) struct InterpreterParameterBindings<'a> {
     pub(crate) literal_slots_by_node: &'a FxHashMap<AstNodeId, LiteralSlotId>,
     pub(crate) literal_values: &'a [LiteralValue],
+    /// Program 3: values of a family template's run-invariant calls,
+    /// computed once per run (the same cells for every member).
+    pub(crate) invariant_values: Option<&'a InvariantValues>,
 }
+
+/// Values of run-invariant calls by node (see `InterpreterParameterBindings`).
+pub(crate) type InvariantValues =
+    FxHashMap<AstNodeId, (LiteralValue, Option<crate::format::FormatId>)>;
 
 pub struct Interpreter<'a> {
     pub context: &'a dyn EvaluationContext,
@@ -239,6 +262,9 @@ impl<'a> Interpreter<'a> {
         };
         match self.local_env.lookup(name)? {
             LocalBinding::Value(v) => Some(crate::traits::CalcValue::Scalar(v)),
+            LocalBinding::ValueWithReference { value, .. } => {
+                Some(crate::traits::CalcValue::Scalar(value))
+            }
             LocalBinding::Callable(c) => Some(crate::traits::CalcValue::Callable(c)),
         }
     }
@@ -249,12 +275,24 @@ impl<'a> Interpreter<'a> {
         }
         match self.local_env.lookup(name)? {
             LocalBinding::Callable(c) => Some(c),
-            LocalBinding::Value(_) => None,
+            LocalBinding::Value(_) | LocalBinding::ValueWithReference { .. } => None,
         }
     }
 
     pub fn resolve_local_name(&self, name: &str) -> Option<LocalBinding> {
         self.local_env.lookup(name)
+    }
+
+    /// The spreadsheet reference a LET/LAMBDA local was bound to, when it was
+    /// bound to a reference expression rather than a computed value.
+    pub(crate) fn resolve_local_bound_reference(&self, name: &str) -> Option<ReferenceType> {
+        if self.local_env.is_empty() {
+            return None;
+        }
+        match self.local_env.lookup(name)? {
+            LocalBinding::ValueWithReference { reference, .. } => Some(reference),
+            LocalBinding::Value(_) | LocalBinding::Callable(_) => None,
+        }
     }
 
     pub fn resolve_range_view<'c>(
@@ -350,6 +388,9 @@ impl<'a> Interpreter<'a> {
             }
             AstNodeData::Function { name_id, .. } => {
                 let name = data_store.resolve_ast_string(*name_id);
+                if name == CALL_NODE_NAME {
+                    return Err(call_expression_error());
+                }
                 let fun = self.context.get_function("", name).ok_or_else(|| {
                     ExcelError::new(ExcelErrorKind::Name)
                         .with_message(format!("Unknown function: {name}"))
@@ -414,6 +455,9 @@ impl<'a> Interpreter<'a> {
             return Some(self.evaluate_arena_ast_as_reference(node_id, data_store, sheet_registry));
         };
         let name = data_store.resolve_ast_string(*name_id);
+        if name == CALL_NODE_NAME {
+            return Some(Err(call_expression_error()));
+        }
         let fun = match self.context.get_function("", name) {
             Some(fun) => fun,
             None => {
@@ -470,6 +514,27 @@ impl<'a> Interpreter<'a> {
             .map(|reference| reference.into_owned())
     }
 
+    /// Evaluate a formula given as a template plus offset (a compressed
+    /// family member, or a formula on its own cell at offset zero).
+    pub(crate) fn evaluate_formula_view(
+        &self,
+        view: crate::engine::graph::FormulaView,
+        data_store: &DataStore,
+        sheet_registry: &SheetRegistry,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        if view.row_delta == 0 && view.col_delta == 0 {
+            self.evaluate_arena_ast(view.template, data_store, sheet_registry)
+        } else {
+            self.evaluate_arena_ast_with_offset(
+                view.template,
+                view.row_delta,
+                view.col_delta,
+                data_store,
+                sheet_registry,
+            )
+        }
+    }
+
     pub(crate) fn evaluate_arena_ast_with_offset(
         &self,
         node_id: AstNodeId,
@@ -489,6 +554,17 @@ impl<'a> Interpreter<'a> {
             parameter_bindings: self.parameter_bindings,
         };
         offset.evaluate_arena_ast(node_id, data_store, sheet_registry)
+    }
+
+    #[inline]
+    fn annotated(
+        value: LiteralValue,
+        format: Option<crate::format::FormatId>,
+    ) -> crate::traits::CalcValue<'a> {
+        match format {
+            Some(format) => crate::traits::CalcValue::AnnotatedScalar(value, format),
+            None => crate::traits::CalcValue::Scalar(value),
+        }
     }
 
     fn annotate_cell_value(
@@ -578,6 +654,73 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// A unary operator other than `@` on an evaluated operand (shared by
+    /// the AST walk and the elementwise lift).
+    pub(crate) fn apply_unary_op(
+        &self,
+        op: &str,
+        expr: crate::traits::CalcValue<'a>,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        // For now, materialize for operators. Future: virtual range ops.
+        let v = expr.into_literal();
+        match v {
+            LiteralValue::Array(arr) => self
+                .map_array(arr, |cell| self.eval_unary_scalar(op, cell))
+                .map(crate::traits::CalcValue::Scalar),
+            other => self
+                .eval_unary_scalar(op, other)
+                .map(crate::traits::CalcValue::Scalar),
+        }
+    }
+
+    /// A binary operator other than `:` on evaluated operands and their
+    /// format annotations (shared by the AST walk and the elementwise lift).
+    pub(crate) fn apply_binary_op(
+        &self,
+        op: &str,
+        left: LiteralValue,
+        left_format: Option<crate::format::FormatId>,
+        right: LiteralValue,
+        right_format: Option<crate::format::FormatId>,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        if matches!(op, "=" | "<>" | ">" | "<" | ">=" | "<=") {
+            return self
+                .compare(op, left, right)
+                .map(crate::traits::CalcValue::Scalar);
+        }
+
+        match op {
+            "+" => self.numeric_binary(left, right, b'+').map(|value| {
+                self.annotate_numeric_result(
+                    value,
+                    self.binary_format('+', left_format, right_format),
+                )
+            }),
+            "-" => self.numeric_binary(left, right, b'-').map(|value| {
+                self.annotate_numeric_result(
+                    value,
+                    self.binary_format('-', left_format, right_format),
+                )
+            }),
+            "*" => self
+                .numeric_binary(left, right, b'*')
+                .map(crate::traits::CalcValue::Scalar),
+            "/" => self
+                .numeric_binary(left, right, b'/')
+                .map(crate::traits::CalcValue::Scalar),
+            "^" => self
+                .numeric_binary(left, right, b'^')
+                .map(crate::traits::CalcValue::Scalar),
+            "&" => self
+                .concat_values(left, right)
+                .map(crate::traits::CalcValue::Scalar),
+            _ => {
+                Err(ExcelError::new(ExcelErrorKind::NImpl)
+                    .with_message(format!("Binary op '{op}'")))
+            }
+        }
+    }
+
     pub(crate) fn evaluate_arena_ast(
         &self,
         node_id: AstNodeId,
@@ -622,13 +765,13 @@ impl<'a> Interpreter<'a> {
                     };
                     let row = shift_axis_for_offset(*row, self.reference_row_delta, *row_abs)?;
                     let col = shift_axis_for_offset(*col, self.reference_col_delta, *col_abs)?;
-                    let value = self.context.resolve_cell_reference_value(
+                    let (value, format) = self.context.resolve_cell_reference_value_formatted(
                         sheet_name,
                         row,
                         col,
                         self.current_sheet,
                     )?;
-                    Ok(self.annotate_cell_value(sheet_name, row, col, value))
+                    Ok(Self::annotated(value, format))
                 } else {
                     let reference =
                         data_store.reconstruct_reference_type_for_eval(ref_type, sheet_registry);
@@ -658,16 +801,7 @@ impl<'a> Interpreter<'a> {
                     let v = self.eval_implicit_intersection_calc(expr);
                     return Ok(crate::traits::CalcValue::Scalar(v));
                 }
-                // For now, materialize for operators. Future: virtual range ops.
-                let v = expr.into_literal();
-                match v {
-                    LiteralValue::Array(arr) => self
-                        .map_array(arr, |cell| self.eval_unary_scalar(op, cell))
-                        .map(crate::traits::CalcValue::Scalar),
-                    other => self
-                        .eval_unary_scalar(op, other)
-                        .map(crate::traits::CalcValue::Scalar),
-                }
+                self.apply_unary_op(op, expr)
             }
             AstNodeData::BinaryOp {
                 op_id,
@@ -699,45 +833,7 @@ impl<'a> Interpreter<'a> {
                 let right_calc = self.evaluate_arena_ast(*right_id, data_store, sheet_registry)?;
                 let right_format = right_calc.format_id();
                 let right = right_calc.into_literal();
-
-                if matches!(op, "=" | "<>" | ">" | "<" | ">=" | "<=") {
-                    return self
-                        .compare(op, left, right)
-                        .map(crate::traits::CalcValue::Scalar);
-                }
-
-                match op {
-                    "+" => self.numeric_binary(left, right, |a, b| a + b).map(|value| {
-                        self.annotate_numeric_result(
-                            value,
-                            self.binary_format('+', left_format, right_format),
-                        )
-                    }),
-                    "-" => self.numeric_binary(left, right, |a, b| a - b).map(|value| {
-                        self.annotate_numeric_result(
-                            value,
-                            self.binary_format('-', left_format, right_format),
-                        )
-                    }),
-                    "*" => self
-                        .numeric_binary(left, right, |a, b| a * b)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "/" => self
-                        .divide(left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "^" => self
-                        .power(left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "&" => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-                        format!(
-                            "{}{}",
-                            crate::coercion::to_text_invariant(&left),
-                            crate::coercion::to_text_invariant(&right)
-                        ),
-                    ))),
-                    _ => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                        .with_message(format!("Binary op '{op}'"))),
-                }
+                self.apply_binary_op(op, left, left_format, right, right_format)
             }
             AstNodeData::Array { .. } => {
                 let (rows, cols, elements) =
@@ -770,7 +866,16 @@ impl<'a> Interpreter<'a> {
                 ))
             }
             AstNodeData::Function { name_id, .. } => {
+                if let Some(bindings) = self.parameter_bindings
+                    && let Some(values) = bindings.invariant_values
+                    && let Some((value, format)) = values.get(&node_id)
+                {
+                    return Ok(Self::annotated(value.clone(), *format));
+                }
                 let name = data_store.resolve_ast_string(*name_id);
+                if name == CALL_NODE_NAME {
+                    return Err(call_expression_error());
+                }
                 let args = data_store.get_args(node_id).ok_or_else(|| {
                     ExcelError::new(ExcelErrorKind::Value).with_message("Missing function args")
                 })?;
@@ -795,13 +900,19 @@ impl<'a> Interpreter<'a> {
 
                 if let Some(callable) = self.resolve_local_callable(name) {
                     let mut eval_args = Vec::with_capacity(args.len());
+                    let mut arg_references = Vec::with_capacity(args.len());
                     for arg_id in args {
+                        // Same rule as the AST twin above.
+                        arg_references.push(
+                            ArgumentHandle::new_arena(*arg_id, self, data_store, sheet_registry)
+                                .bound_reference_in_env(&self.local_env),
+                        );
                         eval_args.push(
                             self.evaluate_arena_ast(*arg_id, data_store, sheet_registry)?
                                 .into_literal(),
                         );
                     }
-                    return callable.invoke(self, &eval_args);
+                    return callable.invoke_with_references(self, &eval_args, &arg_references);
                 }
 
                 Err(ExcelError::new(ExcelErrorKind::Name)
@@ -847,8 +958,7 @@ impl<'a> Interpreter<'a> {
                 .map(crate::traits::CalcValue::Scalar),
             ASTNodeType::BinaryOp { op, left, right } => self.eval_binary(op, left, right),
             ASTNodeType::Function { name, args } => self.eval_function_to_calc(name, args),
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { .. } => Err(call_expression_error()),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -910,8 +1020,7 @@ impl<'a> Interpreter<'a> {
                 }
                 self.eval_function_to_calc(name, args)
             }
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { .. } => Err(call_expression_error()),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -939,13 +1048,13 @@ impl<'a> Interpreter<'a> {
         {
             let row = shift_axis_for_offset(*row, self.reference_row_delta, *row_abs)?;
             let col = shift_axis_for_offset(*col, self.reference_col_delta, *col_abs)?;
-            let value = self.context.resolve_cell_reference_value(
+            let (value, format) = self.context.resolve_cell_reference_value_formatted(
                 sheet.as_deref(),
                 row,
                 col,
                 self.current_sheet,
             )?;
-            return Ok(self.annotate_cell_value(sheet.as_deref(), row, col, value));
+            return Ok(Self::annotated(value, format));
         }
 
         let reference = self.effective_reference(reference)?;
@@ -1009,8 +1118,8 @@ impl<'a> Interpreter<'a> {
             // unary `-` form coerces operands to numbers. The `=+A1` idiom is common in
             // finance models (Lotus 1-2-3 carry-over) and must preserve text labels.
             "+" => Ok(v),
-            "-" => self.apply_number_unary(v, |n| -n),
-            "%" => self.apply_number_unary(v, |n| n / 100.0),
+            "-" => self.apply_number_unary(v, b'-'),
+            "%" => self.apply_number_unary(v, b'%'),
             _ => {
                 Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(format!("Unary op '{op}'")))
             }
@@ -1184,16 +1293,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn apply_number_unary<F>(&self, v: LiteralValue, f: F) -> Result<LiteralValue, ExcelError>
-    where
-        F: Fn(f64) -> f64,
-    {
+    fn apply_number_unary(&self, v: LiteralValue, op: u8) -> Result<LiteralValue, ExcelError> {
         match crate::coercion::to_arithmetic_number_with_locale(
             &v,
             &self.context.locale(),
             self.context.date_system(),
         ) {
-            Ok(n) => match crate::coercion::sanitize_numeric(f(n)) {
+            Ok(n) => match unary_f64(op, n) {
                 Ok(n2) => Ok(LiteralValue::Number(n2)),
                 Err(e) => Ok(LiteralValue::Error(e)),
             },
@@ -1220,34 +1326,30 @@ impl<'a> Interpreter<'a> {
                 .map(crate::traits::CalcValue::Scalar);
         }
         match op {
-            "+" => self.numeric_binary(left, right, |a, b| a + b).map(|value| {
+            "+" => self.numeric_binary(left, right, b'+').map(|value| {
                 self.annotate_numeric_result(
                     value,
                     self.binary_format('+', left_format, right_format),
                 )
             }),
-            "-" => self.numeric_binary(left, right, |a, b| a - b).map(|value| {
+            "-" => self.numeric_binary(left, right, b'-').map(|value| {
                 self.annotate_numeric_result(
                     value,
                     self.binary_format('-', left_format, right_format),
                 )
             }),
             "*" => self
-                .numeric_binary(left, right, |a, b| a * b)
+                .numeric_binary(left, right, b'*')
                 .map(crate::traits::CalcValue::Scalar),
             "/" => self
-                .divide(left, right)
+                .numeric_binary(left, right, b'/')
                 .map(crate::traits::CalcValue::Scalar),
             "^" => self
-                .power(left, right)
+                .numeric_binary(left, right, b'^')
                 .map(crate::traits::CalcValue::Scalar),
-            "&" => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-                format!(
-                    "{}{}",
-                    crate::coercion::to_text_invariant(&left),
-                    crate::coercion::to_text_invariant(&right)
-                ),
-            ))),
+            "&" => self
+                .concat_values(left, right)
+                .map(crate::traits::CalcValue::Scalar),
             ":" => {
                 let left_ref = self.evaluate_ast_as_reference(left_node)?;
                 let right_ref = self.evaluate_ast_as_reference(right_node)?;
@@ -1285,10 +1387,16 @@ impl<'a> Interpreter<'a> {
 
         if let Some(callable) = self.resolve_local_callable(name) {
             let mut eval_args = Vec::with_capacity(args.len());
+            let mut arg_references = Vec::with_capacity(args.len());
             for arg in args {
+                // Same rule `LET` uses to keep a bound range: a
+                // syntactic reference expression, or a local that itself
+                // carries a bound reference; nothing else.
+                arg_references
+                    .push(ArgumentHandle::new(arg, self).bound_reference_in_env(&self.local_env));
                 eval_args.push(self.evaluate_ast(arg)?.into_literal());
             }
-            return callable.invoke(self, &eval_args);
+            return callable.invoke_with_references(self, &eval_args, &arg_references);
         }
 
         // Include the function name in the error message for better debugging
@@ -1329,15 +1437,15 @@ impl<'a> Interpreter<'a> {
             .map(|cv| cv.into_literal())
     }
 
-    fn numeric_binary<F>(
+    /// `+ - * / ^` on two operands: arrays broadcast, each element pair is
+    /// coerced to numbers (first error wins, left first) and combined by
+    /// [`arith_f64`].
+    fn numeric_binary(
         &self,
         left: LiteralValue,
         right: LiteralValue,
-        f: F,
-    ) -> Result<LiteralValue, ExcelError>
-    where
-        F: Fn(f64, f64) -> f64 + Copy,
-    {
+        op: u8,
+    ) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
             let a = crate::coercion::to_arithmetic_number_with_locale(
                 &l,
@@ -1350,8 +1458,8 @@ impl<'a> Interpreter<'a> {
                 self.context.date_system(),
             );
             match (a, b) {
-                (Ok(a), Ok(b)) => match crate::coercion::sanitize_numeric(f(a, b)) {
-                    Ok(n2) => Ok(LiteralValue::Number(n2)),
+                (Ok(a), Ok(b)) => match arith_f64(op, a, b) {
+                    Ok(n) => Ok(LiteralValue::Number(n)),
                     Err(e) => Ok(LiteralValue::Error(e)),
                 },
                 (Err(e), _) | (_, Err(e)) => Ok(LiteralValue::Error(e)),
@@ -1359,59 +1467,35 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    fn divide(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
-        self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_arithmetic_number_with_locale(
-                &l,
-                &self.context.locale(),
-                self.context.date_system(),
-            );
-            let rn = crate::coercion::to_arithmetic_number_with_locale(
-                &r,
-                &self.context.locale(),
-                self.context.date_system(),
-            );
-            let (a, b) = match (ln, rn) {
-                (Ok(a), Ok(b)) => (a, b),
-                (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
-            };
-            if b == 0.0 {
-                return Ok(LiteralValue::Error(ExcelError::from_error_string(
-                    "#DIV/0!",
-                )));
-            }
-            match crate::coercion::sanitize_numeric(a / b) {
-                Ok(n) => Ok(LiteralValue::Number(n)),
-                Err(e) => Ok(LiteralValue::Error(e)),
-            }
-        })
-    }
-
-    fn power(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
-        self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_arithmetic_number_with_locale(
-                &l,
-                &self.context.locale(),
-                self.context.date_system(),
-            );
-            let rn = crate::coercion::to_arithmetic_number_with_locale(
-                &r,
-                &self.context.locale(),
-                self.context.date_system(),
-            );
-            let (a, b) = match (ln, rn) {
-                (Ok(a), Ok(b)) => (a, b),
-                (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
-            };
-            // Excel domain: negative base with non-integer exponent -> #NUM!
-            if a < 0.0 && b.fract() != 0.0 {
-                return Ok(LiteralValue::Error(ExcelError::new_num()));
-            }
-            match crate::coercion::sanitize_numeric(a.powf(b)) {
-                Ok(n) => Ok(LiteralValue::Number(n)),
-                Err(e) => Ok(LiteralValue::Error(e)),
-            }
-        })
+    /// The `&` operator. Like the arithmetic operators it works element by
+    /// element over arrays and ranges, and an error operand is the result (the
+    /// left one when both are errors) instead of being spelled into the text.
+    fn concat_values(
+        &self,
+        left: LiteralValue,
+        right: LiteralValue,
+    ) -> Result<LiteralValue, ExcelError> {
+        fn concat_scalar(
+            left: LiteralValue,
+            right: LiteralValue,
+        ) -> Result<LiteralValue, ExcelError> {
+            Ok(match (left, right) {
+                (LiteralValue::Error(error), _) | (_, LiteralValue::Error(error)) => {
+                    LiteralValue::Error(error)
+                }
+                (left, right) => LiteralValue::Text(format!(
+                    "{}{}",
+                    crate::coercion::to_text_invariant(&left),
+                    crate::coercion::to_text_invariant(&right)
+                )),
+            })
+        }
+        // Scalars (every member of a lifted family) skip the broadcast.
+        if matches!(left, LiteralValue::Array(_)) || matches!(right, LiteralValue::Array(_)) {
+            self.broadcast_apply(left, right, concat_scalar)
+        } else {
+            concat_scalar(left, right)
+        }
     }
 
     fn map_array<F>(&self, arr: Vec<Vec<LiteralValue>>, f: F) -> Result<LiteralValue, ExcelError>
@@ -1574,51 +1658,87 @@ impl<'a> Interpreter<'a> {
             (v, Array(arr)) => self.broadcast_apply(v, Array(arr), |a, b| self.compare(op, a, b)),
             (l, r) => {
                 let res = match (l, r) {
+                    // Same-rank fast paths. These agree with `cmp_ranked` below
+                    // and exist only to avoid the rank/`Empty` dance.
                     (Number(a), Number(b)) => self.cmp_f64(a, b, op),
+                    (Int(a), Int(b)) => self.cmp_f64(a as f64, b as f64, op),
                     (Int(a), Number(b)) => self.cmp_f64(a as f64, b, op),
                     (Number(a), Int(b)) => self.cmp_f64(a, b as f64, op),
                     (Boolean(a), Boolean(b)) => {
                         self.cmp_f64(if a { 1.0 } else { 0.0 }, if b { 1.0 } else { 0.0 }, op)
                     }
                     (Text(a), Text(b)) => self.cmp_text(&a, &b, op),
-                    (a, b) => {
-                        // fallback to numeric coercion or text compare
-                        let an = crate::coercion::to_number_lenient_with_locale(
-                            &a,
-                            &self.context.locale(),
-                        )
-                        .ok();
-                        let bn = crate::coercion::to_number_lenient_with_locale(
-                            &b,
-                            &self.context.locale(),
-                        )
-                        .ok();
-                        if let (Some(a), Some(b)) = (an, bn) {
-                            self.cmp_f64(a, b, op)
-                        } else {
-                            self.cmp_text(
-                                &crate::coercion::to_text_invariant(&a),
-                                &crate::coercion::to_text_invariant(&b),
-                                op,
-                            )
-                        }
-                    }
+                    (a, b) => self.cmp_ranked(a, b, op),
                 };
                 Ok(LiteralValue::Boolean(res))
             }
         }
     }
 
-    fn cmp_f64(&self, a: f64, b: f64, op: &str) -> bool {
-        match op {
-            "=" => a == b,
-            "<>" => a != b,
-            ">" => a > b,
-            "<" => a < b,
-            ">=" => a >= b,
-            "<=" => a <= b,
-            _ => unreachable!(),
+    /// Mixed-type relational comparison.
+    ///
+    /// Excel does not coerce across types in `<`, `<=`, `>`, `>=`, `=`, `<>`.
+    /// It applies a pure type rank, identical for all six operators:
+    ///
+    /// ```text
+    /// number  <  text  <  boolean
+    /// ```
+    ///
+    /// Only when both operands share a rank are they compared within the type
+    /// (measured in Excel for Mac 16.105.3, en_US). Consequences of the rank: `TRUE=1` is FALSE, `1<TRUE` is TRUE,
+    /// `"5"=5` is FALSE (numeric text never coerces), `"5">4` is TRUE,
+    /// `"TRUE"=TRUE` is FALSE, and `"Z"<FALSE` is TRUE.
+    ///
+    /// Errors never reach here: `compare` short-circuits them above.
+    fn cmp_ranked(&self, l: LiteralValue, r: LiteralValue, op: &str) -> bool {
+        use LiteralValue::*;
+
+        // A never-written cell is polymorphic rather than ranked: it adopts the
+        // other operand's type and behaves as that type's zero value, so
+        // `Z1=0`, `Z1=""`, `Z1=FALSE` and `Z1<TRUE` are all TRUE.
+        let (l, r) = match (l, r) {
+            (Empty, Empty) => (Number(0.0), Number(0.0)),
+            (Empty, r) => (empty_as_zero_of(&r), r),
+            (l, Empty) => {
+                let e = empty_as_zero_of(&l);
+                (l, e)
+            }
+            (l, r) => (l, r),
+        };
+
+        let (lr, rr) = (excel_type_rank(&l), excel_type_rank(&r));
+        if lr != rr {
+            return self.cmp_f64(lr as f64, rr as f64, op);
         }
+
+        match (l, r) {
+            (Text(a), Text(b)) => self.cmp_text(&a, &b, op),
+            (Boolean(a), Boolean(b)) => {
+                self.cmp_f64(if a { 1.0 } else { 0.0 }, if b { 1.0 } else { 0.0 }, op)
+            }
+            // Same rank, number class: Int/Number and the date/time/duration
+            // serial-bearing variants. Text is never parsed here.
+            (a, b) => {
+                let an = crate::coercion::to_number_strict(&a).ok();
+                let bn = crate::coercion::to_number_strict(&b).ok();
+                if let (Some(a), Some(b)) = (an, bn) {
+                    self.cmp_f64(a, b, op)
+                } else {
+                    // Only `Pending` (and any future non-numeric, non-text,
+                    // non-boolean variant) lands here; keep the legacy text
+                    // fallback so those pairs behave as before.
+                    self.cmp_text(
+                        &crate::coercion::to_text_invariant(&a),
+                        &crate::coercion::to_text_invariant(&b),
+                        op,
+                    )
+                }
+            }
+        }
+    }
+
+    fn cmp_f64(&self, a: f64, b: f64, op: &str) -> bool {
+        cmp_f64(a, b, op)
     }
     fn cmp_text(&self, a: &str, b: &str, op: &str) -> bool {
         let loc = self.context.locale();
@@ -1636,6 +1756,86 @@ impl<'a> Interpreter<'a> {
                 _ => unreachable!(),
             },
         )
+    }
+}
+
+/// A numeric comparison operator on two numbers (shared by the walk and
+/// the typed lift).
+#[inline]
+pub(crate) fn cmp_f64(a: f64, b: f64, op: &str) -> bool {
+    match op {
+        "=" => a == b,
+        "<>" => a != b,
+        ">" => a > b,
+        "<" => a < b,
+        ">=" => a >= b,
+        "<=" => a <= b,
+        _ => unreachable!(),
+    }
+}
+
+/// `+ - * / ^` on two numbers after coercion: the result, or the error
+/// the operator yields (`#DIV/0!`, `#NUM!` for a negative base with a
+/// fractional exponent or a non-finite result). Shared by the walk and
+/// the typed lift, so both are bit-identical.
+#[inline]
+pub(crate) fn arith_f64(op: u8, a: f64, b: f64) -> Result<f64, ExcelError> {
+    let v = match op {
+        b'+' => a + b,
+        b'-' => a - b,
+        b'*' => a * b,
+        b'/' => {
+            if b == 0.0 {
+                return Err(ExcelError::from_error_string("#DIV/0!"));
+            }
+            a / b
+        }
+        b'^' => {
+            // Excel domain: negative base with non-integer exponent -> #NUM!
+            if a < 0.0 && b.fract() != 0.0 {
+                return Err(ExcelError::new_num());
+            }
+            a.powf(b)
+        }
+        _ => unreachable!("arithmetic operator"),
+    };
+    crate::coercion::sanitize_numeric(v)
+}
+
+/// Unary `-` and `%` on a number after coercion (shared by the walk and
+/// the typed lift).
+#[inline]
+pub(crate) fn unary_f64(op: u8, n: f64) -> Result<f64, ExcelError> {
+    crate::coercion::sanitize_numeric(match op {
+        b'-' => -n,
+        b'%' => n / 100.0,
+        _ => unreachable!("unary operator"),
+    })
+}
+
+/// Excel's relational type rank: `number < text < boolean`.
+///
+/// The number class covers `Int`, `Number` and the serial-bearing temporal
+/// variants (`Date`, `DateTime`, `Time`, `Duration`), because on a sheet a date
+/// cell *is* a number. `Empty` is deliberately not ranked here — it is
+/// polymorphic and must be resolved against the other operand before ranking
+/// (see `Interpreter::cmp_ranked`). `Error` never reaches ranking.
+fn excel_type_rank(v: &LiteralValue) -> u8 {
+    match v {
+        LiteralValue::Text(_) => 1,
+        LiteralValue::Boolean(_) => 2,
+        _ => 0,
+    }
+}
+
+/// The zero value of `other`'s type, used to give a blank operand the type of
+/// whatever it is compared against: `0` against a number, `""` against text,
+/// `FALSE` against a boolean.
+fn empty_as_zero_of(other: &LiteralValue) -> LiteralValue {
+    match other {
+        LiteralValue::Text(_) => LiteralValue::Text(String::new()),
+        LiteralValue::Boolean(_) => LiteralValue::Boolean(false),
+        _ => LiteralValue::Number(0.0),
     }
 }
 
@@ -1699,7 +1899,11 @@ fn shift_optional_axis_for_offset(
         .transpose()
 }
 
-fn shift_axis_for_offset(value: u32, delta: i64, is_absolute: bool) -> Result<u32, ExcelError> {
+pub(crate) fn shift_axis_for_offset(
+    value: u32,
+    delta: i64,
+    is_absolute: bool,
+) -> Result<u32, ExcelError> {
     if is_absolute {
         return Ok(value);
     }

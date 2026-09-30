@@ -1,23 +1,26 @@
 //! Compact coordinate representations shared across the engine and bindings.
 //!
-//! `Coord` encodes an absolute cell position (row, column) in 64 bits.
-//! Default layout matches Excel: 1,048,576 rows × 16,384 columns.
-//! With the `wide-rows` feature: 4,294,967,296 rows (32 bits) × 16,384 columns.
-//! `RelativeCoord` extends that layout with anchor flags that preserve the `$A$1`
-//! semantics needed while parsing and adjusting formulas.
+//! `Coord` encodes an absolute cell position (row, column) in 64 bits with the same
+//! limits as Excel: 1,048,576 rows × 16,384 columns. `RelativeCoord` extends that
+//! layout with anchor flags that preserve the `$A$1` semantics needed while parsing
+//! and adjusting formulas.
 
 use core::{fmt, str::FromStr};
 
 // INFObySolved: `wide-rows` re-lays the packing for grid-v3's taller-than-Excel
-// sheets. The module is public so every other copy of the layout (engine
+// sheets: 4,294,967,296 rows (32 bits) × 16,384 columns instead of the Excel
+// limits above. The module is public so every other copy of the layout (engine
 // `addr.rs`, the `eval.rs` spill guards) derives from it instead of restating
 // Excel's bit widths and silently drifting when the feature is on.
+// `GRID_ROW_MAX` is the last row a sheet can use: `ROW_MAX`, except that
+// `wide-rows` keeps `u32::MAX` reserved (symbol ordering, inclusive `r + 1`).
 #[cfg(not(feature = "wide-rows"))]
 pub mod packing {
     pub const ROW_BITS: u32 = 20;
     pub const COL_BITS: u32 = 14;
     pub const ROW_MAX: u32 = (1 << ROW_BITS) - 1;
     pub const COL_MAX: u32 = (1 << COL_BITS) - 1;
+    pub const GRID_ROW_MAX: u32 = ROW_MAX;
     pub const ROW_MAX_1BASED: u32 = ROW_MAX + 1;
     pub const COL_MAX_1BASED: u32 = COL_MAX + 1;
     pub const ROW_SHIFT: u32 = 24;
@@ -36,6 +39,7 @@ pub mod packing {
     pub const COL_BITS: u32 = 14;
     pub const ROW_MAX: u32 = u32::MAX;
     pub const COL_MAX: u32 = (1 << COL_BITS) - 1;
+    pub const GRID_ROW_MAX: u32 = u32::MAX - 1;
     // Every u32 is a valid 0-based row; 1-based max does not fit in u32.
     pub const ROW_MAX_1BASED: u64 = ROW_MAX as u64 + 1;
     pub const COL_MAX_1BASED: u32 = COL_MAX + 1;

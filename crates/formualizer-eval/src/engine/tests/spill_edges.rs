@@ -45,14 +45,17 @@ fn spill_exceeds_sheet_bounds_rows() {
     let mut engine = Engine::new(wb, serial_eval_config());
 
     // Anchor at last allowed row (1-based max 1_048_576); spilling 2 rows exceeds bounds
+    // INFObySolved: the last row follows the gated packing (`wide-rows`:
+    // 1-based `u32::MAX`, the eval authority grid's last row).
+    let last = crate::engine::authority::geom::MAX_ROW + 1;
     engine
-        .set_cell_value("Sheet1", 1_048_576, 1, LiteralValue::Int(0))
+        .set_cell_value("Sheet1", last, 1, LiteralValue::Int(0))
         .unwrap();
     engine
-        .set_cell_formula("Sheet1", 1_048_576, 1, parse("={1;2}").unwrap())
+        .set_cell_formula("Sheet1", last, 1, parse("={1;2}").unwrap())
         .unwrap();
     let _ = engine.evaluate_all().unwrap();
-    match engine.get_cell_value("Sheet1", 1_048_576, 1) {
+    match engine.get_cell_value("Sheet1", last, 1) {
         Some(LiteralValue::Error(e)) => assert_eq!(e, "#SPILL!"),
         v => panic!("expected #SPILL!, got {v:?}"),
     }

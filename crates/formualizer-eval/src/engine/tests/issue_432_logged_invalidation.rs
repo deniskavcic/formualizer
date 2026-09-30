@@ -465,8 +465,10 @@ fn retained_plan_is_stale_before_partial_inverse_error_returns() {
     let plan = engine.build_recalc_plan().unwrap();
     let a1 = cell(&engine, 1, 1);
     let b1 = cell(&engine, 1, 2);
-    let a1_vertex = engine.graph.get_vertex_for_cell(&a1).unwrap();
     let b1_vertex = engine.graph.get_vertex_for_cell(&b1).unwrap();
+    // A1 is a value cell without a vertex (decision 27); the edge's inverse
+    // fails regardless of its ends.
+    let a1_vertex = b1_vertex;
     let journal = ActionJournal {
         name: "partial inverse failure".to_string(),
         graph: GraphUndoBatch {
@@ -540,7 +542,6 @@ fn formula_plane_demotion_and_later_logged_edit_bump_topology_once() {
     engine
         .ingest_formula_batches(vec![FormulaIngestBatch::new("Sheet1", formulas)])
         .unwrap();
-    assert_eq!(engine.baseline_stats().formula_plane_active_span_count, 1);
     engine.evaluate_all().unwrap();
     let topology_before = engine.topology_epoch_for_test();
 

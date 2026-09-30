@@ -39,6 +39,64 @@ fn inject_external_link_rels(bytes: Vec<u8>, idx: u32, target: &str) -> Vec<u8> 
     writer.finish().unwrap().into_inner()
 }
 
+use super::strict_interactive;
+
+#[test]
+fn calamine_ragged_array_returns_controlled_parse_error() {
+    use formualizer_workbook::{LoadStrategy, Workbook, WorkbookConfig};
+    let path = build_workbook(|book| {
+        let sh = book.get_sheet_by_name_mut("Sheet1").unwrap();
+        sh.get_cell_mut((1, 1)).set_formula("{1,2;3}");
+    });
+    for deferred in [false, true] {
+        let adapter = CalamineAdapter::open_path(&path).unwrap();
+        let mut config = WorkbookConfig::interactive();
+        config.eval.defer_graph_building = deferred;
+        // Preserve the loader's existing CoerceToError policy, rather than
+        // inventing padding or changing all malformed-formula ingestion.
+        let mut wb =
+            Workbook::from_reader(adapter, LoadStrategy::EagerAll, config.clone()).unwrap();
+        // Deferred loading canonicalizes malformed text during preparation.
+        wb.evaluate_all().unwrap();
+        let source = wb.get_formula("Sheet1", 1, 1);
+        assert!(
+            source
+                .as_deref()
+                .unwrap()
+                .contains("Array rows must have equal length")
+        );
+        let events = wb.changelog().events().len();
+        for _ in 0..2 {
+            let LiteralValue::Error(error) = wb.evaluate_cell("Sheet1", 1, 1).unwrap() else {
+                panic!("malformed formula must produce a spreadsheet error");
+            };
+            assert_eq!(error.kind, formualizer_common::ExcelErrorKind::Error);
+            assert_eq!(wb.changelog().events().len(), events);
+            assert_eq!(wb.get_formula("Sheet1", 1, 1), source);
+        }
+        wb.set_formula("Sheet1", 1, 1, "={1,2;3,4}").unwrap();
+        wb.evaluate_all().unwrap();
+        assert_eq!(
+            wb.get_value("Sheet1", 2, 2),
+            Some(LiteralValue::Number(4.0))
+        );
+
+        config.eval.formula_parse_policy = formualizer_eval::engine::FormulaParsePolicy::Strict;
+        let adapter = CalamineAdapter::open_path(&path).unwrap();
+        let error = match Workbook::from_reader(adapter, LoadStrategy::EagerAll, config) {
+            Err(error) => error,
+            Ok(mut wb) if deferred => wb.evaluate_cell("Sheet1", 1, 1).unwrap_err(),
+            Ok(_) => panic!("strict eager ingestion must reject a ragged array"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Array rows must have equal length"),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn calamine_extracts_formulas_and_normalizes_equals() {
     let path = build_workbook(|book| {
@@ -71,7 +129,7 @@ fn calamine_extracts_formulas_and_normalizes_equals() {
 fn calamine_failed_preparation_preserves_source_inspection_and_history() {
     use formualizer_common::CellAddress;
     use formualizer_eval::engine::inspect::SnapshotOptions;
-    use formualizer_workbook::{LoadStrategy, Workbook, WorkbookConfig};
+    use formualizer_workbook::{LoadStrategy, Workbook};
 
     let path = build_workbook(|book| {
         let sh = book.get_sheet_by_name_mut("Sheet1").unwrap();
@@ -81,12 +139,8 @@ fn calamine_failed_preparation_preserves_source_inspection_and_history() {
     });
     for targeted in [false, true] {
         let adapter = CalamineAdapter::open_path(&path).unwrap();
-        let mut wb = Workbook::from_reader(
-            adapter,
-            LoadStrategy::EagerAll,
-            WorkbookConfig::interactive(),
-        )
-        .unwrap();
+        let mut wb =
+            Workbook::from_reader(adapter, LoadStrategy::EagerAll, strict_interactive()).unwrap();
         let original: Vec<_> = (1..=3)
             .map(|col| wb.get_formula("Sheet1", 1, col).unwrap())
             .collect();
@@ -135,7 +189,7 @@ fn calamine_failed_preparation_preserves_source_inspection_and_history() {
 
 #[test]
 fn calamine_ordinary_targets_isolate_unrelated_preparation_failures() {
-    use formualizer_workbook::{LoadStrategy, Workbook, WorkbookConfig};
+    use formualizer_workbook::{LoadStrategy, Workbook};
     let path = build_workbook(|book| {
         let sh = book.get_sheet_by_name_mut("Sheet1").unwrap();
         for (col, formula) in [(1, "1+2"), (2, "NOSHEET!A1"), (3, "B1+1"), (4, "A1+5")] {
@@ -143,12 +197,8 @@ fn calamine_ordinary_targets_isolate_unrelated_preparation_failures() {
         }
     });
     let adapter = CalamineAdapter::open_path(&path).unwrap();
-    let mut wb = Workbook::from_reader(
-        adapter,
-        LoadStrategy::EagerAll,
-        WorkbookConfig::interactive(),
-    )
-    .unwrap();
+    let mut wb =
+        Workbook::from_reader(adapter, LoadStrategy::EagerAll, strict_interactive()).unwrap();
     assert_eq!(
         wb.evaluate_cell("Sheet1", 1, 1).unwrap(),
         LiteralValue::Number(3.0)
@@ -191,7 +241,7 @@ fn calamine_ordinary_targets_isolate_unrelated_preparation_failures() {
 #[test]
 fn calamine_locator_retained_admission_across_packages_and_failures() {
     use formualizer_eval::engine::{EvaluationBudgets, ResourceExhaustionReason};
-    use formualizer_workbook::{LoadStrategy, Workbook, WorkbookConfig};
+    use formualizer_workbook::{LoadStrategy, Workbook};
     let path = build_workbook(|book| {
         book.new_sheet("Second").unwrap();
         for name in ["Sheet1", "Second"] {
@@ -206,7 +256,7 @@ fn calamine_locator_retained_admission_across_packages_and_failures() {
         let mut wb = Workbook::from_reader(
             CalamineAdapter::open_path(&path).unwrap(),
             LoadStrategy::EagerAll,
-            WorkbookConfig::interactive(),
+            strict_interactive(),
         )
         .unwrap();
         let prepare = |wb: &mut Workbook, sheet: &str, row, col| {

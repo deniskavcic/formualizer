@@ -19,13 +19,16 @@ use std::fmt;
 
 use crate::{RangeAddress, SheetAddressError, format_a1_sheet_name};
 
-const MAX_ROW: u32 = 1_048_576;
+// INFObySolved: 1-based bounds of the gated grid (`wide-rows`: `u32::MAX`).
+const MAX_ROW: u32 = crate::coord::packing::GRID_ROW_MAX + 1;
 const MAX_COLUMN: u32 = 16_384;
 
 fn validate_row(row: u32) -> Result<(), SheetAddressError> {
     match row {
         0 => Err(SheetAddressError::ZeroIndex),
         1..=MAX_ROW => Ok(()),
+        // INFObySolved: unreachable under `wide-rows` (every nonzero row fits).
+        #[allow(unreachable_patterns)]
         _ => Err(SheetAddressError::RowOutOfBounds),
     }
 }
@@ -253,10 +256,13 @@ mod tests {
             CellAddress::new("S", 0, 1).unwrap_err(),
             SheetAddressError::ZeroIndex
         );
-        assert_eq!(
-            CellAddress::new("S", MAX_ROW + 1, 1).unwrap_err(),
-            SheetAddressError::RowOutOfBounds
-        );
+        // INFObySolved: under `wide-rows` every nonzero `u32` row is in range.
+        if let Some(row) = MAX_ROW.checked_add(1) {
+            assert_eq!(
+                CellAddress::new("S", row, 1).unwrap_err(),
+                SheetAddressError::RowOutOfBounds
+            );
+        }
         assert_eq!(
             CellAddress::new("S", 1, MAX_COLUMN + 1).unwrap_err(),
             SheetAddressError::ColumnOutOfBounds
@@ -270,10 +276,12 @@ mod tests {
             RangeArea::new("S", None, Some(0), None, Some(2)).unwrap_err(),
             SheetAddressError::ZeroIndex
         );
-        assert_eq!(
-            RangeArea::new("S", Some(MAX_ROW + 1), None, None, None).unwrap_err(),
-            SheetAddressError::RowOutOfBounds
-        );
+        if let Some(row) = MAX_ROW.checked_add(1) {
+            assert_eq!(
+                RangeArea::new("S", Some(row), None, None, None).unwrap_err(),
+                SheetAddressError::RowOutOfBounds
+            );
+        }
         assert_eq!(
             RangeArea::new("S", None, None, None, Some(MAX_COLUMN + 1)).unwrap_err(),
             SheetAddressError::ColumnOutOfBounds

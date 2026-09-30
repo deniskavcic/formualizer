@@ -2,7 +2,240 @@
 
 All notable changes to Formualizer will be documented in this file.
 
-## Unreleased
+## [0.10.1] - 2026-09-30
+
+### Fixed
+
+- Corrected cumulative interest and principal allocation in `CUMIPMT` and `CUMPRINC`. #498
+- Corrected `CHISQ.TEST` degrees of freedom for rectangular tables and one-dimensional inputs. #498
+- Rejected ragged array literals at parse time instead of accepting inconsistent row widths. #498
+- Returned catchable `#NUM!` errors for `POWER` and `EXP` overflow. #498
+- Honored tilde-escaped wildcards in criteria functions and `SEARCH`. #498
+- Recalculated spill readers and their dependents when a spill committed earlier in the same evaluation pass, rather than leaving stale results. #498
+- Applied `IFERROR` and `IFNA` elementwise to arrays and ranges, including annotated arrays, with singleton-axis broadcasting. Clean inputs leave the fallback unevaluated; matching errors evaluate it at most once. Generated results respect the array-size cap, and cancellation and resource-limit failures propagate instead of selecting a fallback.
+- Checked range-result spill limits before materializing cells, without limiting intermediate ranges used by reductions.
+- Preserved retryable work when live cancellation occurred during the final evaluation unit: the request now returns cancellation without committing or cleaning that unit.
+
+### Validation
+
+- Added permanent correctness-oracled benchmark scenarios for error guards and excluded expected wrong answers from timing comparisons. Performance acceptance remains pending; no new quantitative performance claim is made here.
+
+### Versions
+
+- Prepared product crates and Python/npm packages at `0.10.1`, with `formualizer-common` and `formualizer-parse` at `3.1.4` for the parser fix. `sheetport-spec` remains `0.3.1`; CFFI and benchmark-core remain `0.1.0`.
+
+## [0.10.0] - 2026-09-29
+
+**Formualizer 0.10 is a new engine under the same API.** In 0.9.3, every formula cell had its own parse tree, its own graph vertex and its own edge list, and was evaluated one cell at a time. That is gone. When you fill a formula down a column, the whole run is now one unit: one dependency node, one shared template, and one evaluation that reads its inputs as typed Arrow columns and writes its results back as a block. Lookups and conditional aggregates over a fixed table index that table once, not once per cell. Cells that only hold values no longer cost a graph vertex at all.
+
+Your values don't change. Every step of this work was checked against the previous engine, cell by cell, on the full test corpus, the Enron workbook sample and a 1M-formula model. The exceptions are the Excel-compatibility fixes listed below, where 0.9.3 was wrong.
+
+Against 0.9.3 on the same machine and inputs (release builds; head as a fraction of 0.9.3, geomean; lower is better):
+
+| | load + first calculation | edit + recalculation (value / formula) | heap after calculation | peak heap |
+|---|---|---|---|---|
+| Enron workbook sample (25 files) | **0.31×** | **0.15× / 0.04×** | **0.13×** | **0.09×** |
+| Generated finance and operations models (2) | **0.29×** | **0.22× / 0.12×** | **0.06×** | **0.07×** |
+| Synthetic benchmark workbooks (17) | **0.30×** | **0.10× / 0.04×** | **0.21×** | **0.21×** |
+
+- **A 1M-formula financial model:**
+  - loads in 4.2 s (was 25.1 s) and calculates in 0.38 s (was 4.8 s);
+  - recalculates a value edit in 52 ms (was 2.5 s);
+  - holds 45 MB of heap (was 897 MB), and peaks at 195 MB during calculation (was 2.9 GB).
+- **The 17 end-to-end benchmark scenarios:** full calculation 0.18× and edit + recalculation 0.22× of 0.9.3; against 0.9.3's opt-in span mode, loading is 0.09×.
+- **Individual workloads:** 1,000 `SUMIFS` over a 100k-row fact table calculate in 55 ms (was 9.6 s). A cross-sheet dimension lookup calculates in 56 ms (was 16.9 s).
+- **Against LibreOffice Calc 24.2** (headless, threaded) on 52 workbooks and generated workloads: load + first calculation takes 0.24× LibreOffice's time (faster in 48 of 52), and calculation alone 0.44×. Lookup- and criteria-heavy models load and calculate 7–150× faster: 40k `INDEX`/`MATCH` over a 50k-row table take 0.35 s against 53 s. Details in [benchmarks/0.10-vs-0.9.3.md](benchmarks/0.10-vs-0.9.3.md#libreoffice-calc).
+
+### Highlights
+
+- **One dependency structure, built for copied formulas.**
+  - A region-node dependency authority replaces the per-cell dependency graph. A family of copied formulas is a single node with relative edges, however many rows it covers.
+  - Dirty propagation, scheduling, cycles, targeted evaluation, inspection and structural edits all come from it.
+- **Formula families evaluate as one unit.**
+  - A run of copies evaluates through one template.
+  - Arithmetic, comparisons, `IF`, `IFERROR`, `AND`, `OR`, `ROUND`, `ABS`, `MIN`, `MAX`, `SUM`, the `IS*` tests and date parts run over typed number lanes.
+  - Results are bit-identical to the per-cell path, with the same error precedence and number formats.
+- **Range and lookup kernels.**
+  - Windowed and anchored `SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT` reduce each cell's slice in the scalar function's order, bit-identically.
+  - `SUMIF(S)`/`COUNTIF(S)`/`AVERAGEIF(S)` index their fixed ranges once per run, including whole columns.
+  - Calls that read the same table for every row (`INDEX`/`MATCH`/`VLOOKUP` over a fixed range) are computed once per run.
+  - Lookup indexes are built once and shared across threads.
+  - Recurrences and running totals (`=C2+D1` filled down) evaluate as one sequential chain.
+- **Far less memory.**
+  - Copied formulas share one template instead of storing their own tree.
+  - Value cells have no dependency vertex.
+  - The loader keeps small sheets small.
+  - Heap after the first calculation is about an eighth of 0.9.3 on the Enron workbooks, and a twentieth on the 1M-formula model.
+- **Fast loading in every mode.**
+  - The interactive mode that Python, WASM and the C API use by default builds its graph through the same grouping and compression as an eager load.
+  - Files without a `<dimension>` element no longer load in quadratic time.
+- **More Excel-compatible.** Comparisons rank types as Excel does, and `ROUND` and `TEXT` round Excel's 15-digit decimal view. `TEXT` renders real number formats, `&` propagates errors and broadcasts over arrays, and `XLOOKUP`, `OFFSET`, `INDEX`, `SWITCH`, `SEQUENCE` and the criteria functions follow Excel on edge cases they got wrong. Each fix was measured against Excel and is listed under Fixed.
+
+### Upgrading
+
+- **Most applications need no changes.** The workbook, Python, WASM and C APIs are unchanged, and none of them exposes the internals that changed.
+- **The `BestEffort` default:** a formula that references a missing sheet or table now loads and evaluates to an error instead of failing preparation. `PreparationPolicy::Strict` keeps the old behavior. See [Changed](#changed).
+- **Low-level `formualizer-eval` users:** the dependency graph's internals, vertex ids and change-log events changed. See [Breaking changes](#breaking-changes-low-level-formualizer-eval-api) and [migrating to the dependency authority](docs/dependency-authority-migration.md).
+- **Versions:** the Rust product crates and the Python and npm packages are 0.10.0. `formualizer-common` and `formualizer-parse` move together to 3.1.3 (the external-range parsing fix and the coordinate hasher change); `sheetport-spec` stays at 0.3.1.
+- **FormulaPlane span evaluation is gone.** Its opt-in switches (`with_span_evaluation`, `FormulaPlaneMode` and the Python/WASM toggles) are accepted and ignored. The default engine is faster than span mode was.
+
+### Changed
+
+- **Preparation policy default is now `BestEffort`.** A formula that references a sheet or table that does not exist is accepted instead of failing preparation ("Sheet not found", "Undefined table").
+  - It evaluates to an error value while the target is missing, which `IFERROR` and friends see like any other cell error.
+  - It re-binds and recalculates when the sheet or table is added (`add_sheet`, implicit sheet creation, `define_table`).
+  - This applies to direct assignment, batch and deferred ingest, and imported workbooks.
+  - **The previous behavior is kept exactly under `PreparationPolicy::Strict`:** set `EvalConfig::preparation_policy` / `with_preparation_policy(PreparationPolicy::Strict)` in Rust, or `EvaluationConfig.strict_preparation = True` in Python (new property).
+  - References to a *removed* sheet are unchanged under both policies: `#REF!`, healed when the sheet returns.
+  - See [preparation errors](docs/preparation-error-policy.md).
+- **Results that 0.9.3 could leave stale are now current:**
+  - dynamic references (`INDIRECT`/`OFFSET`) whose target is still dirty re-plan in the same recalculation;
+  - readers of newly spilled cells recalculate in the same request, and a whole-column reader sees a spill committed earlier in the same pass;
+  - `Table[Col]` readers order after formulas in the table body;
+  - restored formulas stay current after undoing a row or column insert or delete;
+  - a missing table under `BestEffort` evaluates to `#NAME?` (was `#N/IMPL!`).
+- **The interactive build matches the eager load.** A workbook loaded with `defer_graph_building` (the `WorkbookConfig::interactive()` default of every binding) builds its graph at the first evaluation through the eager load's family grouping, id pre-allocation and compression.
+  - The load itself still only reads values and stages formula texts.
+  - Targeted preparation and edits before the first evaluation are unchanged.
+  - The umya and JSON loaders group copied formulas as the Calamine loader does.
+- **FormulaPlane span evaluation was removed.** Its switches are accepted and ignored, and values are unchanged; with the dependency authority as the only runtime path, spans were never placed. The parts ingest still uses (canonical templates, dependency summaries) moved to `engine::template`.
+- **Performance switches.** `EvalConfig::{family_execution, family_kernels, family_lift, formula_compression}` (all default `true`) turn the family paths off and restore per-cell evaluation and storage. They are meant for differential testing, not tuning.
+- **Inspection work budgets** charge one unit per reported reader.
+
+### Breaking changes (low-level `formualizer-eval` API)
+
+None of these are exposed by the workbook API or the Python, WASM or C bindings. [Migrating to the dependency authority](docs/dependency-authority-migration.md) lists the replacements.
+
+**Dependency graph**
+- Legacy's dependency structures exist only with the new `legacy_oracle` feature, a differential-testing aid that is never a runtime path. Gone from normal builds:
+  - modules `engine::csr_edges`, `engine::delta_edges`, `engine::topo`;
+  - `engine::Scheduler`;
+  - `DependencyGraph::{get_dependents, get_dependencies, get_range_dependencies, add_dependency_edge, add_edges_nobatch, build_edges_from_adjacency, add_range_edges, rebuild_edges, flush_pending_edge_deltas, edges_delta_size, edges_rebuild_count}`;
+  - the public field `NamedRange::dependents`.
+- `EvalConfig`'s Pearce–Kelly and stripe knobs are accepted and ignored.
+- `ChangeEvent::RemoveVertex`'s edge fields and `VertexSnapshot::out_edges` are always empty.
+- `InspectionUnavailableReason` gains `DependencyAuthorityUnavailable`.
+- The `unified_authority` feature is a no-op.
+- `Layer` gains a private field; build one with `Layer::new(vertices)`. Within a schedule layer, acyclic cells are ordered by position (sheet, column, row) rather than by vertex id; cycle members keep vertex-id order.
+
+**Formulas and ids**
+- **Compressed family members:**
+  - `DependencyGraph::get_formula_id`, `get_formula_id_and_volatile`, `get_formula_node` and `get_formula_node_and_volatile` return `None` for a compressed family member.
+  - Use `DependencyGraph::formula_view(VertexId) -> Option<FormulaView>` (`template`, `row_delta`, `col_delta`; `#[non_exhaustive]`), or `get_formula` for the instantiated tree.
+- **One id space.** A formula cell's `VertexId` is its dependency-authority id.
+  - `AuthorityHost::vertex_of_id`, `vertex_of_id_bytes` and `journal` are removed.
+  - Symbol binding identities (names, tables, sources) start at `authority::identity::HOST_SYMBOL_ID_BASE` (2^31).
+  - Vertex ids stop at `vertex_store::MAX_VERTEX_ID` (2^31 - 1, was `u32::MAX`).
+- **Id lifecycle.**
+  - Ids belong to formula cells. A formula replaced by a value retires its id at the cell, and a formula entered there again takes it back.
+  - Undo and redo restore original ids, including after a structural delete; legacy re-created the cell on a new vertex.
+  - Ids are never reused for another cell and never renumbered.
+- **Load numbering.** Formula vertices created by a bulk load are numbered column by column per sheet, so each column of a family is one id run; legacy used staging order. Cycle iteration is by cell position and does not change.
+- **Value cells have no vertex.**
+  - `DependencyGraph::get_vertex_id_for_address`, `get_vertex_for_cell` and `Engine::vertex_for_cell` return `None` for value and empty cells.
+  - `get_vertex_id_for_address` returns `Option<VertexId>` (was `Option<&VertexId>`). `sheet_index` / `sheet_index_mut` list neither compressed members nor value cells.
+  - `VertexEditor::set_cell_value` returns `VertexId(0)`, and a value edit's `OperationSummary` lists only the dirtied formulas.
+  - `VertexEditor::add_vertex` creates an empty vertex explicitly, and spill children are value cells without vertices.
+  - `EngineBaselineStats::graph_vertex_count` counts formula cells and names; `dirty_vertex_count` no longer counts edited value cells.
+  - A value edit is admitted under an `EvaluationBudgets` limit of zero new vertices, since it allocates none; formula edits are still charged.
+  - An extent record keeps the used extent that open ranges resolve against, so results over `A:A` and `A1:A` are unchanged.
+- **Change logs:**
+  - no `VertexMoved`, `RemoveVertex` or `AddVertex` events for value cells;
+  - undoing a formula typed into a value or empty cell no longer logs a `RemoveVertex` or marks the cell's readers `#REF!`;
+  - row and column edits log `FormulaAdjusted` in vertex-id order (was hash order).
+
+**Configuration and extension points**
+- `EvalConfig` gains the public fields `family_execution`, `family_kernels`, `family_lift` and `formula_compression`; struct literals need `..Default::default()`.
+- `Function` gains the hidden, defaulted `family_kernel()` method and the hidden `FamilyKernel` enum. Only built-ins return one; an override registered under the same name keeps the scalar path.
+- `interpreter::LocalBinding` gains `ValueWithReference { value, reference }`, so exhaustive matches need an arm. `CustomCallable::invoke_with_references` defaults to `invoke`. (#483)
+
+**FormulaPlane removal**
+- The public module `formualizer_eval::formula_plane` is removed with all its items. These are its descriptor types (template, run, partition and virtual-reference ids, grid shapes, `FormulaRunStore`, span counters). None had an engine use.
+- The hidden `relocate_ast_for_template_placement` is now `engine::template::relocate::relocate_ast_for_template_placement`.
+- The `formula_plane_diagnostics` feature's module is `engine::template::diagnostics`, with only `canonical_template_diagnostic`.
+- These are kept, but always `0` or ignored:
+  - the `formula_plane_*` counters of `EngineBaselineStats`;
+  - `PreparationRevision::{authority, authority_indexes, authority_indexed_plane}`;
+  - `EvalConfig::max_formula_plane_cache_*` and `WorkbookLoadLimits::max_formula_plane_fallback_cells`;
+  - `FormulaCompressedPreparation::{is_direct, direct_family_count, direct_cell_count}`.
+- Tracing: the `structural.edit` event is gone, and `evaluate.summary` drops its always-zero span fields.
+
+### Performance
+
+Numbers are against the previous development build unless marked "vs 0.9.3".
+
+- **Loading:**
+  - Copied formulas are grouped as a sheet streams in; a copy stores a reference to its family's template and its tree is never built.
+  - Formula dependencies are planned 10,000 cells at a time.
+  - The Arrow builder keeps exact-size lanes for small sheets and doesn't pre-reserve text space.
+  - Sheets without a `<dimension>` element grow once per batch instead of re-copying a chunk per row.
+  - Spilled formula spools write 64 KB blocks.
+  - Result: 1M-formula model load 25.1 → 4.2 s vs 0.9.3.
+- **Evaluation:**
+  - Families run through their template on typed lanes, with range, criteria and lookup kernels.
+  - The schedule is built from the planner's runs, not its cells.
+  - Recurrences are one chain unit.
+  - The dirty and committed sets are bitmaps.
+  - Layers of cheap formulas don't wake the thread pool.
+  - Result: 1M-formula model first calculation 4.8 → 0.38 s vs 0.9.3.
+- **Recalculation:**
+  - One-cell and small recalculations skip the planner's discovery passes.
+  - Recalculations covered by the kept schedule reuse it.
+  - Edited cells patch the merged column instead of re-merging it.
+  - A recalculation no longer copies untouched parts of a block write, so its cost doesn't grow with the column or the session: a one-cell recalc of a 512k-row column takes about 5 µs, not 519 µs.
+- **Structural edits:**
+  - Row and column inserts and deletes move each run of copied formulas as one block, adjusting its template once.
+  - Change-log events for the run are built only when the log is read.
+  - Inserting rows into the middle of a 50k-row family takes 22 ms (was 0.25 s).
+- **Hashing:** `CoordBuildHasher` now avalanches every hash; all rows below 8192 of a column used to share one probe position (a 50k-cell column fill: 72 → 1.2 ms). Hash values change; nothing depended on them.
+- **Builtins:** loading builtins is a no-op once they are registered, and per-shape formula analysis is reused within a load.
+
+### Fixed
+
+**Excel compatibility** (each measured against Excel for the web or desktop Excel):
+- Comparison operators (`=`, `<>`, `<`, `<=`, `>`, `>=`) rank types like Excel, number < text < boolean, instead of coercing.
+  - `TRUE=1` and `"5"=5` are now `FALSE`, and `TRUE>1` is `TRUE`.
+  - A blank cell takes the other operand's type as its zero value.
+  - This applies element by element over arrays and ranges.
+  - Criteria functions are unchanged.
+  - Part of #291. (#481, @tommy230)
+- `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `TRUNC` and `MROUND` round Excel's 15-significant-digit decimal view:
+  - `=ROUND(1.005,2)` is `1.01` (was `1`), and `=ROUNDDOWN(1.15*100,0)` is `115` (was `114`);
+  - extreme `digits` no longer return NaN. (#484, @tommy230)
+- `TEXT` renders number formats like Excel:
+  - supported: `0`/`#` placeholders, grouping, trailing-comma scaling, `%`, literal text, colour tags and up to three sections;
+  - digits round on the 15-digit view, and results over 255 characters are `#VALUE!`;
+  - `=TEXT(0.0975,"0.00%")` is `9.75%` (was `10%`), and `=TEXT(7,"0000")` is `0007` (was `7`);
+  - date, scientific and fraction codes keep their previous rendering. (#492, @tommy230)
+- The `&` operator returns an error operand (the left one first) instead of spelling it into the text, and works element by element over arrays and ranges. (#491, @tommy230)
+- `XLOOKUP` returns `#VALUE!` when its lookup and return arrays declare different lengths, before any search and regardless of `if_not_found`. (#490, @tommy230)
+- `OFFSET` and `INDEX` coerce blank, boolean and numeric-text position arguments as Excel does. A result past the sheet edge is `#REF!` instead of a panic or overflow. (#487, @tommy230)
+- `INDEX` and `OFFSET` accept a defined name as their reference. (#374; #482, @tommy230)
+- LET locals and LAMBDA parameters bound to a range keep the range in reference positions: `=LET(r,A1:A3,MATCH(2,r,0))` is `2` (was `#NAME?`). (#373; #483, @tommy230)
+- `SWITCH` matches a blank cell against `0`, on either side. (#488, @tommy230)
+- `SEQUENCE` defaults omitted `columns`, `start` and `step` to 1. (#480, @tommy230)
+- `SUMIF(S)`, `COUNTIF(S)` and `AVERAGEIF(S)`:
+  - an error value where a range belongs, such as the `#REF!` Excel leaves after a referenced column is deleted, is the result, not a silent `0`. (#479, @yuvalsegev)
+  - a quoted numeric criterion such as `"3200"` matches numeric cells as well as text: `=COUNTIF(A1:A3,"3200")` over `3200`, `3200`, `"3200"` is `3` (was `1`). (#493, @birgerlie)
+- Statistics:
+  - `ERFC` for arguments ≥ 4 (a sign error in the rational correction); normal-CDF tails, `GAUSS` near zero and `NORM.S.INV` computed to machine precision, with `NORM.S.INV` using Wichura's AS241. (#471, @cloudexible)
+  - `Z.TEST` without `sigma` uses the sample standard deviation, as Excel does. (#472, @cloudexible)
+
+**Loading and parsing**
+- External-workbook ranges such as `[16]jan94!$A$53:$IV$163` and `'[Book.xlsx]My Sheet'!A1:B2` parse as one external range reference.
+- The Calamine loader keeps the spaces around an XML entity in a defined name (`'Alpha & Beta Rates'!$A$1`). (#489, @tommy230)
+- The stored copy of a postfix-call formula such as `=LAMBDA(x,x+1)(B1)` keeps its callee and arguments.
+- Defining a name over a whole-sheet range no longer overflows a 32-bit cell count, which caused a debug panic or an endless loop.
+
+**Engine correctness**
+- A dynamic reader (`OFFSET`, `INDIRECT`) in a layer of eight or more formulas could read a same-layer formula's previous value in a sequential recalculation after structural edits; it now re-plans after them.
+- A computed General result clears a date format that the cell's previous result left, on the small-layer write path too.
+
+**Bindings**
+- C API: every entry point that returns a status catches panics and reports them as `fz_status` instead of aborting the host, and workbook lock poisoning is an error, not a panic. (#469, @Ocean82)
+- WASM: cell and range coordinates are checked against Excel's grid, and lock failures throw instead of returning empty results. (#470, @Ocean82)
+
+Thanks to @tommy230, @cloudexible, @Ocean82, @yuvalsegev and @birgerlie for the fixes in this release.
 
 ## [0.9.3] - 2026-09-11
 
