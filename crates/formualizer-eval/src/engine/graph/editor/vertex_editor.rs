@@ -932,7 +932,7 @@ impl<'g> VertexEditor<'g> {
         self.graph.update_edge_grid_addr(id, new_coord);
 
         // Update cell mapping
-        if map_cell {
+        if map_cell && !self.graph.store.is_deleted(id) { // INFObySolved: deleted formula vertices must not land on live cells, see server/rust/tests/structural.rs
             self.graph
                 .update_cell_mapping(id, old_cell_ref, new_cell_ref);
         }
