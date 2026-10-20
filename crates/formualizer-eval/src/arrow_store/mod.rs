@@ -5624,7 +5624,10 @@ impl ArrowSheet {
                 .iter()
                 .all(|c| c.sparse_chunks.is_empty() && c.chunks.len() == self.chunk_starts.len());
 
-        let lens: Vec<usize> = if dense_aligned {
+        // INFObySolved: an append must not copy dense chunk heights (measured
+        // ~30 GiB at 2M rows, see server/rust/tests/wide_rows.rs). Missing chunks
+        // read as empty; ensure_column_chunk_mut materializes one chunk on write.
+        let lens: Vec<usize> = if dense_aligned && before < self.columns.len() {
             self.columns[0]
                 .chunks
                 .iter()

@@ -62,3 +62,25 @@ upstream chunk does.
   (`engine/graph/editor/vertex_editor.rs`). Otherwise a formula removed by a
   structural edit can reappear on a live cell. Covered by
   `server/rust/tests/structural.rs`.
+
+## Appended columns stay unmaterialized
+
+`ArrowSheet::insert_columns` (`crates/formualizer-eval/src/arrow_store/mod.rs`)
+no longer copies column 0's chunk heights when it appends at the end of a
+dense sheet. A grid-v3 write far to the right of the dense seed columns used
+to give every new column a full-height empty chunk: 1045 MiB RSS at 65,536
+rows, about 30.5 GiB extrapolated at 2,000,000 rows (measured by
+`bench_max_bounds_in_memory` in `server/rust/tests/wide_rows.rs`). Appended
+columns now start with no chunks; missing chunks already read as empty, and
+`ensure_column_chunk_mut` materializes one chunk on the first write. Covered by
+`appended_columns_stay_unmaterialized_until_written` in the same file.
+
+An insert before an existing column on a dense-aligned sheet still copies the
+chunk heights, and the empty-sheet arm is unchanged. After an append the sheet
+is no longer dense-aligned (the new columns have no chunks), so later inserts
+take upstream's sparse arm and stay unmaterialized too. Upstream's
+`column_insert_delete_retains_chunk_alignment` and
+`multiple_adjacent_column_ops_alignment` still pass.
+
+Upstream check, 2026-10-20: upstream main `932e31e3` has no fix;
+`insert_columns` is unchanged since our base `7ec3b5f1`.
