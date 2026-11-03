@@ -38,13 +38,15 @@ pub struct ReferenceAdjuster;
 ///
 /// This lets structural adjustment distinguish unqualified references on the
 /// formula's sheet from qualified references to another sheet.
-pub struct ReferenceContext<'a> { // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
+pub struct ReferenceContext<'a> {
+    // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
     formula_sheet_id: SheetId,
     sheet_registry: &'a SheetRegistry,
 }
 
 impl<'a> ReferenceContext<'a> {
-    pub fn new(formula_sheet_id: SheetId, sheet_registry: &'a SheetRegistry) -> Self { // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
+    pub fn new(formula_sheet_id: SheetId, sheet_registry: &'a SheetRegistry) -> Self {
+        // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
         Self {
             formula_sheet_id,
             sheet_registry,
@@ -149,7 +151,8 @@ impl ReferenceAdjuster {
             .unwrap_or_else(|| ast.clone())
     }
 
-    pub fn adjust_ast_if_changed_in_context( // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
+    pub fn adjust_ast_if_changed_in_context(
+        // INFObySolved: undo rebasing, see server/rust/src/sheet/undo/rebase.rs
         &self,
         ast: &ASTNode,
         op: &ShiftOperation,
