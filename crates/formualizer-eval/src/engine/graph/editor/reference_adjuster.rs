@@ -1,3 +1,4 @@
+use crate::engine::authority::geom::{MAX_COL, MAX_ROW};
 use crate::reference::{CellRef, Coord};
 use crate::{SheetId, engine::sheet_registry::SheetRegistry};
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
@@ -204,13 +205,13 @@ impl ReferenceAdjuster {
                     return None;
                 }
                 ASTNodeType::BinaryOp {
-                    op: bin_op.clone(),
+                    op: *bin_op,
                     left: Box::new(adjusted_left.unwrap_or_else(|| (**left).clone())),
                     right: Box::new(adjusted_right.unwrap_or_else(|| (**right).clone())),
                 }
             }
             ASTNodeType::UnaryOp { op: un_op, expr } => ASTNodeType::UnaryOp {
-                op: un_op.clone(),
+                op: *un_op,
                 expr: Box::new(self.adjust_ast_if_changed_inner(expr, op, policy, context)?),
             },
             ASTNodeType::Function { name, args } => {
@@ -307,6 +308,9 @@ impl ReferenceAdjuster {
                     // Cells before the insert point don't move (nor do
                     // absolute references under the legacy Pin policy).
                     coord
+                } else if coord.row().checked_add(*count).is_none_or(|r| r > MAX_ROW) {
+                    // Pushed off the bottom of the grid: #REF!, as in Excel.
+                    return None;
                 } else {
                     // Shift down
                     Coord::new(
@@ -350,6 +354,9 @@ impl ReferenceAdjuster {
                     // Cells before the insert point don't move (nor do
                     // absolute references under the legacy Pin policy).
                     coord
+                } else if coord.col().checked_add(*count).is_none_or(|c| c > MAX_COL) {
+                    // Pushed off the right edge of the grid: #REF!, as in Excel.
+                    return None;
                 } else {
                     // Shift right
                     Coord::new(
@@ -463,7 +470,7 @@ impl ReferenceAdjuster {
                     if policy.pins() && b.abs {
                         b.index
                     } else if b.index >= before {
-                        b.index + count
+                        b.index.saturating_add(count)
                     } else {
                         b.index
                     }
@@ -482,10 +489,16 @@ impl ReferenceAdjuster {
                 };
 
                 let (adj_sr0, adj_er0) = match op {
-                    ShiftOperation::InsertRows { before, count, .. } => (
-                        sr.map(|b| adjust_insert(b, *before, *count)),
-                        er.map(|b| adjust_insert(b, *before, *count)),
-                    ),
+                    ShiftOperation::InsertRows { before, count, .. } => {
+                        let Some(bounds) = fit_inserted(
+                            sr.map(|b| adjust_insert(b, *before, *count)),
+                            er.map(|b| adjust_insert(b, *before, *count)),
+                            MAX_ROW,
+                        ) else {
+                            return ReferenceAdjustment::Invalidated;
+                        };
+                        bounds
+                    }
                     ShiftOperation::DeleteRows { start, count, .. } => match (sr, er) {
                         (Some(range_start), Some(range_end))
                             if !policy.pins() || (!range_start.abs && !range_end.abs) =>
@@ -536,10 +549,16 @@ impl ReferenceAdjuster {
                 };
 
                 let (adj_sc0, adj_ec0) = match op {
-                    ShiftOperation::InsertColumns { before, count, .. } => (
-                        sc.map(|b| adjust_insert(b, *before, *count)),
-                        ec.map(|b| adjust_insert(b, *before, *count)),
-                    ),
+                    ShiftOperation::InsertColumns { before, count, .. } => {
+                        let Some(bounds) = fit_inserted(
+                            sc.map(|b| adjust_insert(b, *before, *count)),
+                            ec.map(|b| adjust_insert(b, *before, *count)),
+                            MAX_COL,
+                        ) else {
+                            return ReferenceAdjustment::Invalidated;
+                        };
+                        bounds
+                    }
                     ShiftOperation::DeleteColumns { start, count, .. } => match (sc, ec) {
                         (Some(range_start), Some(range_end))
                             if !policy.pins() || (!range_start.abs && !range_end.abs) =>
@@ -606,6 +625,20 @@ impl ReferenceAdjuster {
     }
 }
 
+/// Range bounds after an insert pushed them by up to `max`'s edge: a range
+/// whose start left the grid is gone (`None`, #REF!); an end past the edge
+/// stops at the edge, as in Excel.
+fn fit_inserted(
+    start: Option<u32>,
+    end: Option<u32>,
+    max: u32,
+) -> Option<(Option<u32>, Option<u32>)> {
+    if start.is_some_and(|s| s > max) {
+        return None;
+    }
+    Some((start, end.map(|e| e.min(max))))
+}
+
 impl Default for ReferenceAdjuster {
     fn default() -> Self {
         Self::new()
@@ -644,7 +677,7 @@ impl RelativeReferenceAdjuster {
             }
             ASTNodeType::BinaryOp { op, left, right } => ASTNode {
                 node_type: ASTNodeType::BinaryOp {
-                    op: op.clone(),
+                    op: *op,
                     left: Box::new(self.adjust_formula(left)),
                     right: Box::new(self.adjust_formula(right)),
                 },
@@ -653,7 +686,7 @@ impl RelativeReferenceAdjuster {
             },
             ASTNodeType::UnaryOp { op, expr } => ASTNode {
                 node_type: ASTNodeType::UnaryOp {
-                    op: op.clone(),
+                    op: *op,
                     expr: Box::new(self.adjust_formula(expr)),
                 },
                 source_token: ast.source_token.clone(),
@@ -829,7 +862,7 @@ impl MoveReferenceAdjuster {
                 (
                     ASTNode {
                         node_type: ASTNodeType::BinaryOp {
-                            op: op.clone(),
+                            op: *op,
                             left: Box::new(l_adj),
                             right: Box::new(r_adj),
                         },
@@ -847,7 +880,7 @@ impl MoveReferenceAdjuster {
                 (
                     ASTNode {
                         node_type: ASTNodeType::UnaryOp {
-                            op: op.clone(),
+                            op: *op,
                             expr: Box::new(e_adj),
                         },
                         source_token: ast.source_token.clone(),

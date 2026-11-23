@@ -19,6 +19,7 @@ pub use formualizer::EvalPlan
 pub use formualizer::ExcelError
 pub use formualizer::ExcelErrorExtra
 pub use formualizer::ExcelErrorKind
+pub use formualizer::ExternalLinkPolicy
 pub use formualizer::FormulaDialect
 pub use formualizer::InputUpdate
 pub use formualizer::InspectError
@@ -78,6 +79,7 @@ pub use formualizer::Workbook
 pub use formualizer::WorkbookConfig
 pub use formualizer::WorkbookMode
 pub use formualizer::WorksheetHandle
+pub use formualizer::XlsxLoadLimits
 pub use formualizer::XlsxRecalculateLimits
 pub use formualizer::XlsxRecalculateOptions
 pub use formualizer::XlsxRecalculateResult

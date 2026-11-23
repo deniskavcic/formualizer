@@ -41,7 +41,7 @@ use formualizer_workbook::JsonAdapter;
 #[cfg(feature = "umya")]
 use formualizer_workbook::UmyaAdapter;
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 use formualizer_workbook::CalamineAdapter;
 
 #[cfg(feature = "umya")]
@@ -57,7 +57,7 @@ fn sparse_xlsx_bytes() -> Vec<u8> {
     buf
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 fn out_of_order_sparse_xlsx_bytes() -> Vec<u8> {
     let mut book = umya_spreadsheet::new_file();
     let sheet = book
@@ -95,7 +95,7 @@ fn out_of_order_sparse_xlsx_bytes() -> Vec<u8> {
     out.finish().unwrap().into_inner()
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 fn shared_formula_xlsx_bytes(rows: u32) -> Vec<u8> {
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
@@ -155,7 +155,7 @@ fn shared_formula_xlsx_bytes(rows: u32) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 fn two_sheet_formula_xlsx_bytes() -> Vec<u8> {
     let mut book = umya_spreadsheet::new_file();
     book.get_sheet_by_name_mut("Sheet1")
@@ -290,7 +290,7 @@ fn umya_loader_uses_sparse_initial_ingest_over_sparse_guardrail_shape() {
     assert_sparse_arrow_storage(&wb, "Sheet1", 1_000, 1);
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_loader_uses_sparse_initial_ingest_over_sparse_guardrail_shape() {
     use std::io::Write;
@@ -311,7 +311,7 @@ fn calamine_loader_uses_sparse_initial_ingest_over_sparse_guardrail_shape() {
     assert_sparse_arrow_storage(&wb, "Sheet1", 1_000, 1);
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_loader_preserves_out_of_order_sparse_cells() {
     use std::io::Write;
@@ -333,7 +333,7 @@ fn calamine_loader_preserves_out_of_order_sparse_cells() {
     );
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_formula_source_records_enforce_logical_budget_at_the_boundary() {
     let rows = 8;
@@ -364,7 +364,7 @@ fn calamine_formula_source_records_enforce_logical_budget_at_the_boundary() {
     }
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_loader_loads_shared_formula_semantics() {
     use std::io::Write;
@@ -400,10 +400,15 @@ fn calamine_loader_loads_shared_formula_semantics() {
     );
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_formula_spool_enforces_sheet_workbook_file_and_no_disk_limits() {
     use formualizer_workbook::FormulaSpoolDiskPolicy;
+    let deferred_config = |limits| {
+        let mut config = WorkbookConfig::ephemeral().with_ingest_limits(limits);
+        config.eval.defer_graph_building = true;
+        config
+    };
 
     let zero_limits = WorkbookLoadLimits {
         max_formula_spool_bytes_per_sheet: 0,
@@ -416,11 +421,17 @@ fn calamine_formula_spool_enforces_sheet_workbook_file_and_no_disk_limits() {
     Workbook::from_reader(
         literal_adapter,
         LoadStrategy::EagerAll,
-        WorkbookConfig::ephemeral().with_ingest_limits(zero_limits),
+        WorkbookConfig::ephemeral().with_ingest_limits(zero_limits.clone()),
     )
     .expect("formula spool limits must not charge literal-only sheets");
 
     let one_sheet = shared_formula_xlsx_bytes(1);
+    Workbook::from_reader(
+        CalamineAdapter::open_bytes(one_sheet.clone()).unwrap(),
+        LoadStrategy::EagerAll,
+        WorkbookConfig::ephemeral().with_ingest_limits(zero_limits),
+    )
+    .expect("eager formula staging does not need a spool");
     let cases = [
         (
             WorkbookLoadLimits {
@@ -448,14 +459,11 @@ fn calamine_formula_spool_enforces_sheet_workbook_file_and_no_disk_limits() {
     ];
     for (limits, expected) in cases {
         let adapter = CalamineAdapter::open_bytes(one_sheet.clone()).unwrap();
-        let error = match Workbook::from_reader(
-            adapter,
-            LoadStrategy::EagerAll,
-            WorkbookConfig::ephemeral().with_ingest_limits(limits),
-        ) {
-            Ok(_) => panic!("spool limit must reject the workbook"),
-            Err(error) => error,
-        };
+        let error =
+            match Workbook::from_reader(adapter, LoadStrategy::EagerAll, deferred_config(limits)) {
+                Ok(_) => panic!("spool limit must reject the workbook"),
+                Err(error) => error,
+            };
         assert!(
             error.to_string().contains(expected),
             "unexpected error: {error}"
@@ -468,21 +476,18 @@ fn calamine_formula_spool_enforces_sheet_workbook_file_and_no_disk_limits() {
         max_formula_spool_bytes_per_workbook: 20,
         ..WorkbookLoadLimits::default()
     };
-    let error = match Workbook::from_reader(
-        adapter,
-        LoadStrategy::EagerAll,
-        WorkbookConfig::ephemeral().with_ingest_limits(limits),
-    ) {
-        Ok(_) => panic!("aggregate spool limit must include both sheets"),
-        Err(error) => error,
-    };
+    let error =
+        match Workbook::from_reader(adapter, LoadStrategy::EagerAll, deferred_config(limits)) {
+            Ok(_) => panic!("aggregate spool limit must include both sheets"),
+            Err(error) => error,
+        };
     assert!(
         error.to_string().contains("per-workbook limit"),
         "unexpected error: {error}"
     );
 }
 
-#[cfg(all(feature = "calamine", feature = "umya"))]
+#[cfg(all(feature = "xlsx-recalc", feature = "umya"))]
 #[test]
 fn calamine_sparse_initial_ingest_evaluates_whole_column_summary() {
     use std::io::Write;

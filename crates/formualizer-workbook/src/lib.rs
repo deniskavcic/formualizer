@@ -1,18 +1,23 @@
-#![cfg_attr(target_os = "emscripten", feature(let_chains, unsigned_is_multiple_of))]
-
 pub mod backends;
 pub mod builtins;
 #[cfg(feature = "xlsx-recalc")]
 pub mod cache_recalculate;
+#[cfg(feature = "xlsx-recalc")]
+mod cached_external_links;
 pub mod calc_pr;
+#[cfg(feature = "xlsx-recalc")]
+mod xlsx;
+#[cfg(feature = "xlsx-recalc")]
+pub use cached_external_links::CachedExternalLinkValues;
 pub mod error;
 #[cfg(any(
-    feature = "calamine",
+    feature = "xlsx-recalc",
     feature = "json",
     feature = "umya",
     feature = "umya3"
 ))]
 pub(crate) mod load_limits;
+mod panic_guard;
 #[cfg(any(feature = "umya", feature = "xlsx-recalc"))]
 pub mod recalculate;
 pub mod resolver;
@@ -38,7 +43,7 @@ pub use backends::UmyaAdapter;
 pub use backends::csv::CsvArrayPolicy;
 #[cfg(feature = "json")]
 pub use backends::json::JsonReadOptions;
-#[cfg(feature = "calamine")]
+#[cfg(feature = "xlsx-recalc")]
 pub use backends::{CalamineAdapter, XlsxPathSource};
 #[cfg(any(feature = "umya", feature = "umya3"))]
 pub use backends::{FormulaCacheUpdate, FormulaCacheUpdateRef};
@@ -47,7 +52,8 @@ pub use builtins::{ensure_builtins_loaded, register_function_dynamic, try_load_b
 pub use cache_recalculate::recalculate_xlsx_file;
 #[cfg(feature = "xlsx-recalc")]
 pub use cache_recalculate::{
-    XlsxRecalculateLimits, XlsxRecalculateOptions, XlsxRecalculateResult, recalculate_xlsx_bytes,
+    ExternalLinkPolicy, XlsxRecalculateLimits, XlsxRecalculateOptions, XlsxRecalculateResult,
+    recalculate_xlsx_bytes,
 };
 pub use error::{IoError, with_cell_context};
 #[cfg(any(feature = "umya", feature = "xlsx-recalc"))]
@@ -84,3 +90,11 @@ pub use workbook::{
 #[cfg(feature = "wasm_plugins")]
 pub use workbook::{extract_wasm_manifest_json_from_module, parse_wasm_manifest_json};
 pub use worksheet::WorksheetHandle;
+
+#[cfg(feature = "xlsx-recalc")]
+pub use backends::{NativeXlsxAdapter, XlsxLoadLimits};
+#[cfg(all(test, feature = "xlsx-recalc"))]
+#[path = "../tests/support/source_xlsx.rs"]
+pub(crate) mod test_source_xlsx;
+#[cfg(feature = "xlsx-recalc")]
+pub use xlsx::types::{XlsxError, XlsxReadError};

@@ -1186,8 +1186,13 @@ class SheetPortSession:
         r"""
         Manifest metadata as a Python dictionary (mirrors the YAML structure).
         """
+    def __new__(cls, workbook: Workbook, manifest: typing.Any) -> SheetPortSession: ...
+    @staticmethod
+    def manifest_to_yaml(manifest: typing.Any) -> builtins.str: ...
+    @staticmethod
+    def manifest_from_yaml(yaml: builtins.str) -> typing.Any: ...
     @classmethod
-    def from_manifest_path(cls, manifest_path: builtins.str, workbook_path: builtins.str, backend: typing.Optional[builtins.str] = None) -> SheetPortSession: ...
+    def from_manifest_path(cls, manifest_path: builtins.str, workbook_path: builtins.str, backend: typing.Optional[builtins.str] = None, *, load_limits: typing.Optional[dict] = None) -> SheetPortSession: ...
     @classmethod
     def from_manifest_yaml(cls, manifest_yaml: builtins.str, workbook: Workbook) -> SheetPortSession: ...
     def describe_ports(self) -> typing.Any:
@@ -1545,6 +1550,21 @@ class Workbook:
     ```
     """
     @property
+    def sheet_import_diagnostics(self) -> builtins.list[dict]:
+        r"""
+        Non-calculating sheets omitted by the loader.
+        """
+    @property
+    def name_import_diagnostics(self) -> builtins.list[dict]:
+        r"""
+        Non-fatal defined-name import diagnostics from the loader.
+        """
+    @property
+    def cached_external_link_indices(self) -> builtins.list[builtins.int]:
+        r"""
+        Linked workbook indices whose cached values were loaded, never refreshed.
+        """
+    @property
     def sheet_names(self) -> builtins.list[builtins.str]: ...
     def inspect_cell(self, address: builtins.str, *, include_values: builtins.bool = True) -> CellSnapshotReport:
         r"""
@@ -1568,7 +1588,7 @@ class Workbook:
         """
     def __new__(cls, *, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook: ...
     @classmethod
-    def load_path(cls, path: builtins.str, strategy: typing.Optional[builtins.str] = None, backend: typing.Optional[builtins.str] = None, *, path_source: typing.Optional[XlsxPathSource] = None, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook:
+    def load_path(cls, path: builtins.str, strategy: typing.Optional[builtins.str] = None, backend: typing.Optional[builtins.str] = None, *, path_source: typing.Optional[XlsxPathSource] = None, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None, load_limits: typing.Optional[dict] = None) -> Workbook:
         r"""
         Class method: load an XLSX workbook from a file path.
         
@@ -1576,12 +1596,13 @@ class Workbook:
         
         Args:
             path: Path to the `.xlsx` file.
-            backend: Backend name (currently defaults to `calamine`).
+            backend: `native` (default), `calamine` (native alias), or `umya`.
             path_source: `XlsxPathSource.SHARED_FILE` (the safe default) or
                 `XlsxPathSource.DIRECT_MMAP`. Direct mmap requires a native
                 Calamine `.xlsx` path whose underlying file is not destructively
                 modified or truncated while the workbook loads.
             mode/config: Optional workbook configuration.
+            load_limits: Optional native XLSX package limits; see `load_workbook`.
         
         Example:
         ```python
@@ -1613,9 +1634,9 @@ class Workbook:
         ```
         """
     @classmethod
-    def from_path(cls, path: builtins.str, backend: typing.Optional[builtins.str] = None, *, path_source: typing.Optional[XlsxPathSource] = None, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook: ...
+    def from_path(cls, path: builtins.str, backend: typing.Optional[builtins.str] = None, *, path_source: typing.Optional[XlsxPathSource] = None, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None, load_limits: typing.Optional[dict] = None) -> Workbook: ...
     @classmethod
-    def from_bytes(cls, data: bytes, backend: typing.Optional[builtins.str] = None, *, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook:
+    def from_bytes(cls, data: bytes, backend: typing.Optional[builtins.str] = None, *, mode: typing.Optional[WorkbookMode] = None, config: typing.Optional[WorkbookConfig] = None, span_evaluation: typing.Optional[builtins.bool] = None, load_limits: typing.Optional[dict] = None) -> Workbook:
         r"""
         Class method: load an XLSX workbook from in-memory bytes.
         
@@ -1623,9 +1644,9 @@ class Workbook:
         
         Args:
             data: XLSX payload as `bytes`.
-            backend: Backend name. Defaults to `calamine` in native Python builds
-                and `umya` in Pyodide builds where Calamine is unavailable.
+            backend: Backend name. Defaults to `native` on all platforms. `calamine` is a compatibility alias.
             mode/config: Optional workbook configuration.
+            load_limits: Optional native XLSX package limits; see `load_workbook`.
         """
     def to_xlsx_bytes(self, backend: typing.Optional[builtins.str] = None) -> bytes:
         r"""
@@ -1817,8 +1838,8 @@ class Workbook:
         on the next recalculation. Takes effect on a live workbook; no
         reload is required.
         
-        `deterministic_timezone` accepts `"utc"`, `"local"`, or a fixed
-        offset in seconds — the same spelling as
+        `deterministic_timezone` accepts `"utc"`, `"local"`, a fixed offset
+        such as `"+02:00"`, or an offset in seconds — the same spelling as
         `SheetPortSession.evaluate_once(deterministic_timezone=...)`.
         Omitted means UTC.
         """
@@ -2093,7 +2114,7 @@ class XlsxPathSource(enum.Enum):
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
 
-def load_workbook(path: builtins.str, strategy: typing.Optional[builtins.str] = None, *, path_source: typing.Optional[XlsxPathSource] = None, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook:
+def load_workbook(path: builtins.str, strategy: typing.Optional[builtins.str] = None, *, backend: typing.Optional[builtins.str] = None, path_source: typing.Optional[XlsxPathSource] = None, span_evaluation: typing.Optional[builtins.bool] = None, load_limits: typing.Optional[dict] = None) -> Workbook:
     r"""
     Load an XLSX workbook from a filesystem path.
     
@@ -2101,12 +2122,17 @@ def load_workbook(path: builtins.str, strategy: typing.Optional[builtins.str] = 
     
     Args:
         path: Path to an `.xlsx` file.
-        strategy: Currently accepted for backward compatibility.
-            (The backend/strategy is currently fixed to `calamine` + eager load.)
+        strategy: Currently accepted for backward compatibility; loading is eager.
+        backend: `native` (default), `calamine` (native alias), or `umya`.
         path_source: `XlsxPathSource.SHARED_FILE` (the safe default) or
             `XlsxPathSource.DIRECT_MMAP`. Direct mmap retains an actual read-only
             mapping; the underlying file must not be destructively modified or
             truncated while the workbook loads.
+        load_limits: Optional native XLSX dictionary with integer fields
+            `max_input_bytes`, `max_entries`, `max_expanded_bytes`,
+            `max_part_bytes`, `max_xml_depth`. Omitted fields use Rust defaults;
+            zero allows nothing. Unknown keys, bools and non-integers are errors.
+            These package limits do not replace engine ingest/spool limits.
     
     Example:
     ```python
@@ -2120,13 +2146,14 @@ def load_workbook(path: builtins.str, strategy: typing.Optional[builtins.str] = 
     ```
     """
 
-def load_workbook_bytes(data: bytes, strategy: typing.Optional[builtins.str] = None, backend: typing.Optional[builtins.str] = None, *, span_evaluation: typing.Optional[builtins.bool] = None) -> Workbook:
+def load_workbook_bytes(data: bytes, strategy: typing.Optional[builtins.str] = None, backend: typing.Optional[builtins.str] = None, *, span_evaluation: typing.Optional[builtins.bool] = None, load_limits: typing.Optional[dict] = None) -> Workbook:
     r"""
     Load an XLSX workbook from in-memory bytes.
     
-    This is the byte-oriented counterpart to `load_workbook(...)`. Native Python
-    builds default to `calamine`; Pyodide defaults to `umya` because Calamine is
-    not currently compiled into that target.
+    This is the byte-oriented counterpart to `load_workbook(...)`. All hosts,
+    including Pyodide, default to `native`. `backend="calamine"` is a native
+    compatibility alias; explicit `umya` rich reading remains available.
+    `load_limits` has the same native-only dictionary semantics as `load_workbook`.
     """
 
 def parse(formula: builtins.str, dialect: typing.Optional[FormulaDialect] = None) -> ASTNode:
@@ -2174,15 +2201,37 @@ def recalculate_file(path: builtins.str, output: typing.Optional[builtins.str] =
         `umya-spreadsheet` implementation.
     """
 
-def recalculate_xlsx_bytes(data: bytes, *, error_location_limit: typing.Optional[builtins.int] = None) -> typing.Any:
+def recalculate_xlsx_bytes(data: bytes, *, error_location_limit: typing.Optional[builtins.int] = None, rng_seed: typing.Optional[builtins.int] = None, deterministic_timestamp_utc: typing.Optional[datetime.datetime] = None, deterministic_timezone: typing.Optional[typing.Any] = None, external_links: builtins.str = 'cached') -> typing.Any:
     r"""
     Recalculate XLSX formula caches in memory without rewriting unrelated package parts.
     Returns a dictionary with output ``bytes``, a ``summary``, and formula/cache/worksheet counts.
+    ``rng_seed`` seeds ``RAND``/``RANDBETWEEN`` (the default seed is already
+    stable run to run). ``deterministic_timestamp_utc`` (an aware ``datetime``
+    with a fixed offset) fixes ``TODAY``/``NOW``; ``deterministic_timezone`` (``'utc'``, ``'+02:00'``
+    or offset seconds, default UTC) requires it. Without them ``TODAY``/``NOW``
+    use the host's local time; in Pyodide, which has no system clock, a
+    workbook using them is refused unless ``deterministic_timestamp_utc`` is
+    given. The result's ``clock`` (``now``, ``timezone``, ``fixed``) and
+    ``seed`` replay the run. ``summary["error_summary"][token]["messages"]``
+    gives the reason for each listed location (``None`` when the cell has none
+    of its own) and ``summary["unknown_functions"]`` lists every unimplemented
+    function called, with its cell count. External links are never refreshed:
+    with ``external_links="cached"`` (the default) formulas read the values
+    Excel stored in the workbook and the result's ``external_links`` reports
+    it; ``"refuse"`` raises ``OSError`` instead when any formula reads one.
     """
 
-def recalculate_xlsx_file(path: builtins.str, output: typing.Optional[builtins.str] = None, *, error_location_limit: typing.Optional[builtins.int] = None) -> typing.Any:
+def recalculate_xlsx_file(path: builtins.str, output: typing.Optional[builtins.str] = None, *, error_location_limit: typing.Optional[builtins.int] = None, rng_seed: typing.Optional[builtins.int] = None, deterministic_timestamp_utc: typing.Optional[datetime.datetime] = None, deterministic_timezone: typing.Optional[typing.Any] = None, external_links: builtins.str = 'cached') -> typing.Any:
     r"""
     Recalculate XLSX formula caches from a path using atomic output replacement.
+    Returns the same dictionary as ``recalculate_xlsx_bytes``.
+    ``rng_seed`` seeds ``RAND``/``RANDBETWEEN`` (the default seed is already
+    stable run to run). ``deterministic_timestamp_utc`` (an aware ``datetime``
+    with a fixed offset) fixes ``TODAY``/``NOW``; ``deterministic_timezone`` (``'utc'``, ``'+02:00'``
+    or offset seconds, default UTC) requires it. Without them ``TODAY``/``NOW``
+    use the host's local time. The result's ``clock`` (``now``, ``timezone``,
+    ``fixed``) and ``seed`` replay the run. ``external_links`` is as for
+    ``recalculate_xlsx_bytes``; a refusal writes nothing.
     """
 
 def tokenize(formula: builtins.str, dialect: typing.Optional[FormulaDialect] = None) -> Tokenizer:

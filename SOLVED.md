@@ -4,14 +4,13 @@ This file is ours. Upstream does not have it. It lists every intentional
 divergence from Formualizer `main`, and why grid-v3 needs it. Update it in the
 same commit as a fork change.
 
-Upstream base: `7ec3b5f1` (v0.10.1, 2026-09-30). Our commits on top of that
-merge are `003a4f16` (wide-rows port) and `b61c9ccc` (reference adjuster and
-deleted formula vertices).
+Upstream base: `dfd2f964` (v0.13.0, 2026-10-26). Everything below was carried
+through that merge; our earlier commits are in the branch history.
 
 Audit after a sync:
 
 ```bash
-git diff 7ec3b5f1 --stat -- crates
+git diff dfd2f964 --stat -- crates
 git grep -n INFObySolved
 ```
 
@@ -37,6 +36,35 @@ open grid edge (`engine/authority/extract.rs`). It can over-approximate a
 dependency. It does not drop one. Our tests for this live in
 `engine/authority/tests/wide_rows/` and `wide_rows_order.rs`, with a two-line
 hook left in each upstream test module.
+
+### Row limits added upstream in 0.11-0.13
+
+Upstream's newer code restates Excel's height. Each site below follows the fork
+instead, and the default layout still gets upstream's values. Grid-v3's tests
+for them are in `server/rust/tests/wide_rows.rs`.
+
+- `formualizer-parse/src/tokenizer.rs`, `is_a1_range_end`: the row limit and its
+  digit count come from `GRID_ROW_MAX`. Otherwise `A1:A2000000` parses as two
+  cells joined by `:`, depends only on those two cells, and goes stale when a
+  cell inside it changes. The parse crate has no `wide-rows` feature of its own;
+  it reads the limit from `formualizer-common`.
+- `formualizer-eval/src/interpreter.rs`, open-ended `@`: `SHEET_ROWS` comes from
+  `GRID_ROW_MAX`. Otherwise `=@A:A` past Excel's height returns `#VALUE!`.
+- `formualizer-eval/src/builtins/stats/mod.rs`, `open_range_frame`: paired
+  statistics (CORREL, SLOPE and the rest) size `A:A` by `eval.max_open_ended_rows`
+  through a new `EvaluationContext::max_open_ended_rows` (`traits.rs`, with the
+  `Engine`, `DynamicRefCollector` and `RecordingContext` impls). Otherwise
+  `=CORREL(A:A,B1:B2000000)` returns `#N/A`. The value is per workbook and set at
+  creation or hydrate, so a sheet grown past it reads short until the next
+  hydrate. Other evaluation contexts keep upstream's 1,048,576.
+- `formualizer-eval/src/engine/eval.rs`, `check_insert_room`: the sum is widened
+  to `u64`. Under `wide-rows` the limit is `u32::MAX`, so upstream's saturating
+  sum never exceeds it and an insert could push content off the last row without
+  being refused. The 10,000,000-row product cap cannot reach this; `wide-rows`
+  still claims the full range. Upstream's
+  `engine/tests/insert_at_grid_edge.rs` takes its last row from the packing and
+  expects `=SUM(A3:A)` there, because a range ending on the last row prints as
+  open.
 
 ## Checkpoint hydrate
 
@@ -82,5 +110,5 @@ take upstream's sparse arm and stay unmaterialized too. Upstream's
 `column_insert_delete_retains_chunk_alignment` and
 `multiple_adjacent_column_ops_alignment` still pass.
 
-Upstream check, 2026-10-20: upstream main `932e31e3` has no fix;
-`insert_columns` is unchanged since our base `7ec3b5f1`.
+Upstream check, 2026-11-03: v0.13.0 `dfd2f964` has no fix; `insert_columns` is
+unchanged since `7ec3b5f1`.

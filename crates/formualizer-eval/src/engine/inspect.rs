@@ -81,6 +81,24 @@ pub struct CellSnapshot {
     pub spill: Option<SpillRole>,
 }
 
+/// AST-free result inspection for validated output projection.
+///
+/// `has_formula` includes staged and compressed-family formulas. This does not
+/// certify successful ingestion of a particular source expression: callers must
+/// still reconcile source coordinates and parse-coercion diagnostics. Empty
+/// values retain the same absent/NeverEvaluated semantics as [`CellSnapshot`].
+/// A member's currentness does not certify its anchor; validate that anchor too.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct CellResultState {
+    pub address: CellAddress,
+    pub has_formula: bool,
+    pub value: Option<LiteralValue>,
+    pub staleness: Staleness,
+    pub spill: Option<SpillRole>,
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -867,7 +885,9 @@ impl<R: EvaluationContext> Engine<R> {
         &self,
         address: &CellAddress,
     ) -> Result<(CellKey, CellAddress), InspectError> {
-        CellAddress::new(address.sheet.clone(), address.row, address.column).map_err(|error| {
+        // The constructor validates coordinates only; do not clone the sheet
+        // name merely to discard this temporary validation address.
+        CellAddress::new(String::new(), address.row, address.column).map_err(|error| {
             InspectError::InvalidAddress {
                 message: error.to_string(),
             }
@@ -1011,6 +1031,65 @@ impl<R: EvaluationContext> Engine<R> {
             value_included: include_value,
             staleness,
             volatile,
+            spill,
+        })
+    }
+
+    /// Whether a prepared formula calls SUBTOTAL or AGGREGATE. Reads the
+    /// arena's precomputed subtree bits, including grouped family templates;
+    /// does not reconstruct, render or evaluate the formula. Coordinates are
+    /// one-based; unknown cells and unprepared formulas return false.
+    #[doc(hidden)]
+    pub fn formula_calls_visibility_reducer(&self, sheet: &str, row: u32, col: u32) -> bool {
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return false;
+        };
+        let (Some(row), Some(col)) = (row.checked_sub(1), col.checked_sub(1)) else {
+            return false;
+        };
+        let cell = CellRef::new(sheet_id, Coord::new(row, col, true, true));
+        self.graph
+            .get_vertex_for_cell(&cell)
+            .and_then(|vertex| self.graph.formula_view(vertex))
+            .is_some_and(|view| {
+                self.graph
+                    .data_store()
+                    .ast_calls_visibility_reducer(view.template)
+            })
+    }
+
+    /// Read result presence, currentness and committed spill ownership without
+    /// reconstructing or pretty-printing a formula AST. Does not evaluate,
+    /// prepare dependency state, or materialize compressed formula members.
+    pub fn inspect_cell_result(&self, cell: &CellAddress) -> Result<CellResultState, InspectError> {
+        let (key, address) = self.canonical_cell(cell)?;
+        let staged = self
+            .get_staged_formula_text(&address.sheet, address.row, address.column)
+            .is_some();
+        let source = self.inspect_source();
+        let vertex = self.graph.get_vertex_for_cell(&source.cell_ref(key));
+        let has_formula = staged || vertex.is_some_and(|v| self.graph.has_formula(v));
+        let value = self.read_cell_value(&address.sheet, address.row, address.column);
+        let staleness = if !has_formula {
+            Staleness::Current
+        } else if value.is_none() {
+            Staleness::NeverEvaluated
+        } else if staged || vertex.is_some_and(|v| self.graph.is_dirty(v)) {
+            Staleness::Dirty
+        } else {
+            Staleness::Current
+        };
+        let spill = source.spill_role(key).map(|role| match role {
+            InternalSpillRole::Anchor { extent } => SpillRole::Anchor { extent },
+            InternalSpillRole::Member { anchor } => SpillRole::Member {
+                anchor: self.address_for_key(anchor),
+            },
+        });
+        Ok(CellResultState {
+            address,
+            has_formula,
+            value,
+            staleness,
             spill,
         })
     }

@@ -18,41 +18,63 @@ pub mod formualizer_workbook::backends::calamine
 pub enum formualizer_workbook::backends::calamine::XlsxPathSource
 pub formualizer_workbook::backends::calamine::XlsxPathSource::DirectMmap
 pub formualizer_workbook::backends::calamine::XlsxPathSource::SharedFile
-impl core::clone::Clone for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::clone(&self) -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::Eq for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::PartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::eq(&self, &formualizer_workbook::backends::calamine::XlsxPathSource) -> bool
-impl core::default::Default for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::default() -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::fmt::Debug for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::marker::StructuralPartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
+impl core::clone::Clone for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::clone(&self) -> formualizer_workbook::XlsxPathSource
+impl core::cmp::Eq for formualizer_workbook::XlsxPathSource
+impl core::cmp::PartialEq for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::eq(&self, &formualizer_workbook::XlsxPathSource) -> bool
+impl core::default::Default for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::default() -> formualizer_workbook::XlsxPathSource
+impl core::fmt::Debug for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for formualizer_workbook::XlsxPathSource
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxPathSource
 pub struct formualizer_workbook::backends::calamine::CalamineAdapter
-impl formualizer_workbook::backends::calamine::CalamineAdapter
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::external_link_target(&self, u32) -> core::option::Option<&str>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, calamine::errors::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::backends::calamine::XlsxPathSource) -> core::result::Result<Self, calamine::errors::Error>
-impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::calamine::CalamineAdapter
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
-impl<R> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::backends::calamine::CalamineAdapter where R: formualizer_eval::traits::EvaluationContext
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), Self::Error>
+impl formualizer_workbook::CalamineAdapter
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable_with_limits(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_with_limits(alloc::vec::Vec<u8>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source_and_limits<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader_with_limits(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
+impl<R: formualizer_eval::traits::EvaluationContext> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), formualizer_workbook::error::IoError>
+pub struct formualizer_workbook::backends::calamine::XlsxLoadLimits
+pub formualizer_workbook::backends::calamine::XlsxLoadLimits::max_entries: usize
+pub formualizer_workbook::backends::calamine::XlsxLoadLimits::max_expanded_bytes: usize
+pub formualizer_workbook::backends::calamine::XlsxLoadLimits::max_input_bytes: usize
+pub formualizer_workbook::backends::calamine::XlsxLoadLimits::max_part_bytes: usize
+pub formualizer_workbook::backends::calamine::XlsxLoadLimits::max_xml_depth: usize
+impl core::clone::Clone for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::clone(&self) -> formualizer_workbook::XlsxLoadLimits
+impl core::cmp::Eq for formualizer_workbook::XlsxLoadLimits
+impl core::cmp::PartialEq for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::eq(&self, &formualizer_workbook::XlsxLoadLimits) -> bool
+impl core::default::Default for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::default() -> Self
+impl core::fmt::Debug for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxLoadLimits
 pub mod formualizer_workbook::backends::csv
 pub enum formualizer_workbook::backends::csv::CsvArrayPolicy
 pub formualizer_workbook::backends::csv::CsvArrayPolicy::Blank
@@ -158,11 +180,13 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::csv::CsvAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::csv::CsvAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::csv::CsvAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::csv::CsvAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -170,6 +194,7 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::read_cell(&mut self, &st
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
@@ -233,11 +258,13 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::json::JsonAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::json::JsonAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::json::JsonAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::json::JsonAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::json::JsonAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::json::JsonAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -245,6 +272,7 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
@@ -306,11 +334,13 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::write_formula_caches_b
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -318,6 +348,7 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -370,11 +401,13 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::write_formula_caches_
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -382,6 +415,7 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_cell(&mut self, 
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -409,41 +443,47 @@ pub fn formualizer_workbook::backends::umya3::write_document_writer(&umya_spread
 pub enum formualizer_workbook::backends::XlsxPathSource
 pub formualizer_workbook::backends::XlsxPathSource::DirectMmap
 pub formualizer_workbook::backends::XlsxPathSource::SharedFile
-impl core::clone::Clone for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::clone(&self) -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::Eq for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::PartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::eq(&self, &formualizer_workbook::backends::calamine::XlsxPathSource) -> bool
-impl core::default::Default for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::default() -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::fmt::Debug for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::marker::StructuralPartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
+impl core::clone::Clone for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::clone(&self) -> formualizer_workbook::XlsxPathSource
+impl core::cmp::Eq for formualizer_workbook::XlsxPathSource
+impl core::cmp::PartialEq for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::eq(&self, &formualizer_workbook::XlsxPathSource) -> bool
+impl core::default::Default for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::default() -> formualizer_workbook::XlsxPathSource
+impl core::fmt::Debug for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for formualizer_workbook::XlsxPathSource
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxPathSource
 pub struct formualizer_workbook::backends::CalamineAdapter
-impl formualizer_workbook::backends::calamine::CalamineAdapter
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::external_link_target(&self, u32) -> core::option::Option<&str>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, calamine::errors::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::backends::calamine::XlsxPathSource) -> core::result::Result<Self, calamine::errors::Error>
-impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::calamine::CalamineAdapter
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
-impl<R> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::backends::calamine::CalamineAdapter where R: formualizer_eval::traits::EvaluationContext
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), Self::Error>
+impl formualizer_workbook::CalamineAdapter
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable_with_limits(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_with_limits(alloc::vec::Vec<u8>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source_and_limits<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader_with_limits(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
+impl<R: formualizer_eval::traits::EvaluationContext> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub struct formualizer_workbook::backends::CsvAdapter
 impl formualizer_workbook::backends::csv::CsvAdapter
 pub fn formualizer_workbook::backends::csv::CsvAdapter::new() -> Self
@@ -461,11 +501,13 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::csv::CsvAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::csv::CsvAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::csv::CsvAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::csv::CsvAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -473,6 +515,7 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::read_cell(&mut self, &st
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
@@ -531,11 +574,13 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::json::JsonAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::json::JsonAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::json::JsonAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::json::JsonAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::json::JsonAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::json::JsonAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -543,6 +588,7 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
@@ -561,6 +607,36 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::write_to<W: std::io::W
 impl<R> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::backends::json::JsonAdapter where R: formualizer_eval::traits::EvaluationContext
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), Self::Error>
+pub struct formualizer_workbook::backends::NativeXlsxAdapter
+impl formualizer_workbook::CalamineAdapter
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable_with_limits(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_with_limits(alloc::vec::Vec<u8>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source_and_limits<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader_with_limits(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
+impl<R: formualizer_eval::traits::EvaluationContext> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub struct formualizer_workbook::backends::Umya3Adapter
 impl formualizer_workbook::backends::umya3::UmyaAdapter
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::formula_cells(&self) -> alloc::vec::Vec<(alloc::string::String, u32, u32)>
@@ -572,11 +648,13 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::write_formula_caches_
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -584,6 +662,7 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_cell(&mut self, 
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -613,11 +692,13 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::write_formula_caches_b
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -625,6 +706,7 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -643,6 +725,22 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::write_to<W: std::io::W
 impl<R> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::backends::umya::UmyaAdapter where R: formualizer_eval::traits::EvaluationContext
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), Self::Error>
+pub struct formualizer_workbook::backends::XlsxLoadLimits
+pub formualizer_workbook::backends::XlsxLoadLimits::max_entries: usize
+pub formualizer_workbook::backends::XlsxLoadLimits::max_expanded_bytes: usize
+pub formualizer_workbook::backends::XlsxLoadLimits::max_input_bytes: usize
+pub formualizer_workbook::backends::XlsxLoadLimits::max_part_bytes: usize
+pub formualizer_workbook::backends::XlsxLoadLimits::max_xml_depth: usize
+impl core::clone::Clone for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::clone(&self) -> formualizer_workbook::XlsxLoadLimits
+impl core::cmp::Eq for formualizer_workbook::XlsxLoadLimits
+impl core::cmp::PartialEq for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::eq(&self, &formualizer_workbook::XlsxLoadLimits) -> bool
+impl core::default::Default for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::default() -> Self
+impl core::fmt::Debug for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxLoadLimits
 pub mod formualizer_workbook::builtins
 pub struct formualizer_workbook::builtins::BuiltinsGuard
 pub formualizer_workbook::builtins::BuiltinsGuard::total_registered: usize
@@ -655,6 +753,20 @@ pub fn formualizer_workbook::builtins::load_io_builtins() -> usize
 pub fn formualizer_workbook::builtins::register_function_dynamic(alloc::sync::Arc<dyn formualizer_eval::function::Function>)
 pub fn formualizer_workbook::builtins::try_load_builtins() -> core::result::Result<formualizer_workbook::builtins::BuiltinsGuard, &'static str>
 pub mod formualizer_workbook::cache_recalculate
+pub enum formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub formualizer_workbook::cache_recalculate::ExternalLinkPolicy::Cached
+pub formualizer_workbook::cache_recalculate::ExternalLinkPolicy::Refuse
+impl core::clone::Clone for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::clone(&self) -> formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::cmp::Eq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::cmp::PartialEq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::eq(&self, &formualizer_workbook::cache_recalculate::ExternalLinkPolicy) -> bool
+impl core::default::Default for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::default() -> formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::fmt::Debug for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::marker::StructuralPartialEq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
 pub struct formualizer_workbook::cache_recalculate::XlsxRecalculateLimits
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateLimits::max_cells: usize
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateLimits::max_columns: u32
@@ -675,6 +787,7 @@ pub struct formualizer_workbook::cache_recalculate::XlsxRecalculateOptions
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::cancel: core::option::Option<formualizer_eval::engine::cancel::CancelToken>
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::error_location_limit: usize
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::eval_config: formualizer_eval::engine::EvalConfig
+pub formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::external_links: formualizer_workbook::cache_recalculate::ExternalLinkPolicy
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::limits: formualizer_workbook::cache_recalculate::XlsxRecalculateLimits
 impl core::clone::Clone for formualizer_workbook::cache_recalculate::XlsxRecalculateOptions
 pub fn formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::clone(&self) -> formualizer_workbook::cache_recalculate::XlsxRecalculateOptions
@@ -685,6 +798,8 @@ pub fn formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::fmt(&sel
 pub struct formualizer_workbook::cache_recalculate::XlsxRecalculateResult
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::bytes: alloc::vec::Vec<u8>
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::cache_cells_changed: usize
+pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::clock_now_utc: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::external_links_used: usize
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::formula_cells: usize
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::summary: formualizer_workbook::recalculate::RecalculateSummary
 pub formualizer_workbook::cache_recalculate::XlsxRecalculateResult::worksheet_parts_changed: usize
@@ -705,7 +820,6 @@ pub enum formualizer_workbook::error::IoError
 pub formualizer_workbook::error::IoError::Backend
 pub formualizer_workbook::error::IoError::Backend::backend: alloc::string::String
 pub formualizer_workbook::error::IoError::Backend::message: alloc::string::String
-pub formualizer_workbook::error::IoError::Calamine(calamine::errors::Error)
 pub formualizer_workbook::error::IoError::CellError
 pub formualizer_workbook::error::IoError::CellError::col: alloc::string::String
 pub formualizer_workbook::error::IoError::CellError::message: alloc::string::String
@@ -729,13 +843,14 @@ pub formualizer_workbook::error::IoError::Schema::source: core::option::Option<a
 pub formualizer_workbook::error::IoError::Unsupported
 pub formualizer_workbook::error::IoError::Unsupported::context: alloc::string::String
 pub formualizer_workbook::error::IoError::Unsupported::feature: alloc::string::String
+pub formualizer_workbook::error::IoError::XlsxRead(formualizer_workbook::XlsxReadError)
 impl formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from_backend<E: core::error::Error>(&str, E) -> Self
 pub fn formualizer_workbook::error::IoError::load_budget_exceeded(&str, &str, alloc::string::String) -> Self
-impl core::convert::From<calamine::errors::Error> for formualizer_workbook::error::IoError
-pub fn formualizer_workbook::error::IoError::from(calamine::errors::Error) -> Self
 impl core::convert::From<formualizer_common::error::ExcelError> for formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from(formualizer_common::error::ExcelError) -> Self
+impl core::convert::From<formualizer_workbook::XlsxReadError> for formualizer_workbook::error::IoError
+pub fn formualizer_workbook::error::IoError::from(formualizer_workbook::XlsxReadError) -> Self
 impl core::convert::From<serde_json::error::Error> for formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from(serde_json::error::Error) -> Self
 impl core::convert::From<std::io::error::Error> for formualizer_workbook::error::IoError
@@ -767,6 +882,7 @@ pub struct formualizer_workbook::recalculate::RecalculateErrorSummary
 pub formualizer_workbook::recalculate::RecalculateErrorSummary::count: usize
 pub formualizer_workbook::recalculate::RecalculateErrorSummary::locations: alloc::vec::Vec<alloc::string::String>
 pub formualizer_workbook::recalculate::RecalculateErrorSummary::locations_truncated: usize
+pub formualizer_workbook::recalculate::RecalculateErrorSummary::messages: alloc::vec::Vec<core::option::Option<alloc::string::String>>
 impl core::clone::Clone for formualizer_workbook::recalculate::RecalculateErrorSummary
 pub fn formualizer_workbook::recalculate::RecalculateErrorSummary::clone(&self) -> formualizer_workbook::recalculate::RecalculateErrorSummary
 impl core::cmp::Eq for formualizer_workbook::recalculate::RecalculateErrorSummary
@@ -796,6 +912,7 @@ pub formualizer_workbook::recalculate::RecalculateSummary::errors: usize
 pub formualizer_workbook::recalculate::RecalculateSummary::evaluated: usize
 pub formualizer_workbook::recalculate::RecalculateSummary::sheets: alloc::collections::btree::map::BTreeMap<alloc::string::String, formualizer_workbook::recalculate::RecalculateSheetSummary>
 pub formualizer_workbook::recalculate::RecalculateSummary::status: formualizer_workbook::recalculate::RecalculateStatus
+pub formualizer_workbook::recalculate::RecalculateSummary::unknown_functions: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
 impl formualizer_workbook::recalculate::RecalculateSummary
 pub fn formualizer_workbook::recalculate::RecalculateSummary::has_errors(&self) -> bool
 impl core::clone::Clone for formualizer_workbook::recalculate::RecalculateSummary
@@ -1026,6 +1143,22 @@ impl serde_core::ser::Serialize for formualizer_workbook::traits::MergedRange
 pub fn formualizer_workbook::traits::MergedRange::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for formualizer_workbook::traits::MergedRange
 pub fn formualizer_workbook::traits::MergedRange::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+#[non_exhaustive] pub struct formualizer_workbook::traits::NameImportDiagnostic
+pub formualizer_workbook::traits::NameImportDiagnostic::definition: alloc::string::String
+pub formualizer_workbook::traits::NameImportDiagnostic::local_sheet_id: core::option::Option<usize>
+pub formualizer_workbook::traits::NameImportDiagnostic::message: alloc::string::String
+pub formualizer_workbook::traits::NameImportDiagnostic::name: alloc::string::String
+pub formualizer_workbook::traits::NameImportDiagnostic::scope_sheet: core::option::Option<alloc::string::String>
+impl formualizer_workbook::traits::NameImportDiagnostic
+pub fn formualizer_workbook::traits::NameImportDiagnostic::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<usize>, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for formualizer_workbook::traits::NameImportDiagnostic
+pub fn formualizer_workbook::traits::NameImportDiagnostic::clone(&self) -> formualizer_workbook::traits::NameImportDiagnostic
+impl core::cmp::Eq for formualizer_workbook::traits::NameImportDiagnostic
+impl core::cmp::PartialEq for formualizer_workbook::traits::NameImportDiagnostic
+pub fn formualizer_workbook::traits::NameImportDiagnostic::eq(&self, &formualizer_workbook::traits::NameImportDiagnostic) -> bool
+impl core::fmt::Debug for formualizer_workbook::traits::NameImportDiagnostic
+pub fn formualizer_workbook::traits::NameImportDiagnostic::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for formualizer_workbook::traits::NameImportDiagnostic
 pub struct formualizer_workbook::traits::NamedRange
 pub formualizer_workbook::traits::NamedRange::address: formualizer_common::range::RangeAddress
 pub formualizer_workbook::traits::NamedRange::name: alloc::string::String
@@ -1052,6 +1185,19 @@ impl core::clone::Clone for formualizer_workbook::traits::SheetData
 pub fn formualizer_workbook::traits::SheetData::clone(&self) -> formualizer_workbook::traits::SheetData
 impl core::fmt::Debug for formualizer_workbook::traits::SheetData
 pub fn formualizer_workbook::traits::SheetData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct formualizer_workbook::traits::SheetImportDiagnostic
+pub formualizer_workbook::traits::SheetImportDiagnostic::kind: alloc::string::String
+pub formualizer_workbook::traits::SheetImportDiagnostic::name: alloc::string::String
+impl formualizer_workbook::traits::SheetImportDiagnostic
+pub fn formualizer_workbook::traits::SheetImportDiagnostic::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for formualizer_workbook::traits::SheetImportDiagnostic
+pub fn formualizer_workbook::traits::SheetImportDiagnostic::clone(&self) -> formualizer_workbook::traits::SheetImportDiagnostic
+impl core::cmp::Eq for formualizer_workbook::traits::SheetImportDiagnostic
+impl core::cmp::PartialEq for formualizer_workbook::traits::SheetImportDiagnostic
+pub fn formualizer_workbook::traits::SheetImportDiagnostic::eq(&self, &formualizer_workbook::traits::SheetImportDiagnostic) -> bool
+impl core::fmt::Debug for formualizer_workbook::traits::SheetImportDiagnostic
+pub fn formualizer_workbook::traits::SheetImportDiagnostic::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for formualizer_workbook::traits::SheetImportDiagnostic
 pub struct formualizer_workbook::traits::TableDefinition
 pub formualizer_workbook::traits::TableDefinition::header_row: bool
 pub formualizer_workbook::traits::TableDefinition::headers: alloc::vec::Vec<alloc::string::String>
@@ -1086,11 +1232,13 @@ pub trait formualizer_workbook::traits::SpreadsheetIO: formualizer_workbook::tra
 pub trait formualizer_workbook::traits::SpreadsheetReader: core::marker::Send + core::marker::Sync
 pub type formualizer_workbook::traits::SpreadsheetReader::Error: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn formualizer_workbook::traits::SpreadsheetReader::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::traits::SpreadsheetReader::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::traits::SpreadsheetReader::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::traits::SpreadsheetReader::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::traits::SpreadsheetReader::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::traits::SpreadsheetReader::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::traits::SpreadsheetReader::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::traits::SpreadsheetReader::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::traits::SpreadsheetReader::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::traits::SpreadsheetReader::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::traits::SpreadsheetReader::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1098,31 +1246,37 @@ pub fn formualizer_workbook::traits::SpreadsheetReader::read_cell(&mut self, &st
 pub fn formualizer_workbook::traits::SpreadsheetReader::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::traits::SpreadsheetReader::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::traits::SpreadsheetReader::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::traits::SpreadsheetReader::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::traits::SpreadsheetReader::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
-impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::calamine::CalamineAdapter
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::csv::CsvAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::csv::CsvAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::csv::CsvAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::csv::CsvAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1130,15 +1284,18 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::read_cell(&mut self, &st
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::json::JsonAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::json::JsonAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::json::JsonAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::json::JsonAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::json::JsonAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::json::JsonAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1146,15 +1303,18 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1162,15 +1322,18 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_cell(&mut self, 
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1178,6 +1341,7 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 pub trait formualizer_workbook::traits::SpreadsheetWriter: core::marker::Send + core::marker::Sync
 pub type formualizer_workbook::traits::SpreadsheetWriter::Error: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -1361,6 +1525,8 @@ impl formualizer_eval::traits::ReferenceResolver for formualizer_workbook::workb
 pub fn formualizer_workbook::workbook::WBResolver::resolve_cell_reference(&self, core::option::Option<&str>, u32, u32) -> core::result::Result<formualizer_common::value::LiteralValue, formualizer_common::error::ExcelError>
 impl formualizer_eval::traits::Resolver for formualizer_workbook::workbook::WBResolver
 impl formualizer_eval::traits::SourceResolver for formualizer_workbook::workbook::WBResolver
+pub fn formualizer_workbook::workbook::WBResolver::resolve_source_scalar(&self, &str) -> core::result::Result<formualizer_common::value::LiteralValue, formualizer_common::error::ExcelError>
+pub fn formualizer_workbook::workbook::WBResolver::resolve_source_table(&self, &str) -> core::result::Result<alloc::boxed::Box<dyn formualizer_eval::traits::Table>, formualizer_common::error::ExcelError>
 impl formualizer_eval::traits::TableResolver for formualizer_workbook::workbook::WBResolver
 pub fn formualizer_workbook::workbook::WBResolver::resolve_table_reference(&self, &formualizer_parse::parser::TableReference) -> core::result::Result<alloc::boxed::Box<dyn formualizer_eval::traits::Table>, formualizer_common::error::ExcelError>
 pub struct formualizer_workbook::workbook::WasmFunctionSpec
@@ -1506,6 +1672,7 @@ pub fn formualizer_workbook::workbook::Workbook::bind_wasm_function(&mut self, &
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan(&self) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan_for_targets(&mut self, &[formualizer_eval::engine::target_preparation::EvaluationTarget]) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan_for_targets_with_options(&mut self, &[formualizer_eval::engine::target_preparation::EvaluationTarget], formualizer_eval::engine::target_preparation::TargetEvalOptions<'_>) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::workbook::Workbook::cached_external_link_indices(&self) -> &[usize]
 pub fn formualizer_workbook::workbook::Workbook::changelog(&self) -> &formualizer_eval::engine::graph::editor::change_log::ChangeLog
 pub fn formualizer_workbook::workbook::Workbook::define_named_range(&mut self, &str, &formualizer_common::range::RangeAddress, formualizer_workbook::traits::NamedRangeScope) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::define_table(&mut self, &str, &str, (u32, u32, u32, u32), alloc::vec::Vec<alloc::string::String>, bool, bool) -> core::result::Result<(), formualizer_common::error::ExcelError>
@@ -1555,6 +1722,7 @@ pub fn formualizer_workbook::workbook::Workbook::last_formula_ingest_report(&sel
 pub fn formualizer_workbook::workbook::Workbook::list_custom_functions(&self) -> alloc::vec::Vec<formualizer_workbook::workbook::CustomFnInfo>
 pub fn formualizer_workbook::workbook::Workbook::list_wasm_modules(&self) -> alloc::vec::Vec<formualizer_workbook::workbook::WasmModuleInfo>
 pub fn formualizer_workbook::workbook::Workbook::loaded_calc_settings(&self) -> core::option::Option<&formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::workbook::Workbook::name_import_diagnostics(&self) -> &[formualizer_workbook::traits::NameImportDiagnostic]
 pub fn formualizer_workbook::workbook::Workbook::named_range_address(&self, &str) -> core::option::Option<formualizer_common::range::RangeAddress>
 pub fn formualizer_workbook::workbook::Workbook::new() -> Self
 pub fn formualizer_workbook::workbook::Workbook::new_with_config(formualizer_workbook::workbook::WorkbookConfig) -> Self
@@ -1583,6 +1751,7 @@ pub fn formualizer_workbook::workbook::Workbook::set_rows_hidden(&mut self, &str
 pub fn formualizer_workbook::workbook::Workbook::set_value(&mut self, &str, u32, u32, formualizer_common::value::LiteralValue) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::set_values(&mut self, &str, u32, u32, &[alloc::vec::Vec<formualizer_common::value::LiteralValue>]) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::sheet_dimensions(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::workbook::Workbook::sheet_import_diagnostics(&self) -> &[formualizer_workbook::traits::SheetImportDiagnostic]
 pub fn formualizer_workbook::workbook::Workbook::sheet_names(&self) -> alloc::vec::Vec<alloc::string::String>
 pub fn formualizer_workbook::workbook::Workbook::table_metadata(&self, &str) -> core::option::Option<formualizer_eval::engine::eval::TableMetadata>
 pub fn formualizer_workbook::workbook::Workbook::tables(&self) -> alloc::vec::Vec<formualizer_eval::engine::eval::TableMetadata>
@@ -1691,11 +1860,24 @@ impl core::fmt::Debug for formualizer_workbook::backends::csv::CsvArrayPolicy
 pub fn formualizer_workbook::backends::csv::CsvArrayPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for formualizer_workbook::backends::csv::CsvArrayPolicy
 impl core::marker::StructuralPartialEq for formualizer_workbook::backends::csv::CsvArrayPolicy
+pub enum formualizer_workbook::ExternalLinkPolicy
+pub formualizer_workbook::ExternalLinkPolicy::Cached
+pub formualizer_workbook::ExternalLinkPolicy::Refuse
+impl core::clone::Clone for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::clone(&self) -> formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::cmp::Eq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::cmp::PartialEq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::eq(&self, &formualizer_workbook::cache_recalculate::ExternalLinkPolicy) -> bool
+impl core::default::Default for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::default() -> formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::fmt::Debug for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+pub fn formualizer_workbook::cache_recalculate::ExternalLinkPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
+impl core::marker::StructuralPartialEq for formualizer_workbook::cache_recalculate::ExternalLinkPolicy
 pub enum formualizer_workbook::IoError
 pub formualizer_workbook::IoError::Backend
 pub formualizer_workbook::IoError::Backend::backend: alloc::string::String
 pub formualizer_workbook::IoError::Backend::message: alloc::string::String
-pub formualizer_workbook::IoError::Calamine(calamine::errors::Error)
 pub formualizer_workbook::IoError::CellError
 pub formualizer_workbook::IoError::CellError::col: alloc::string::String
 pub formualizer_workbook::IoError::CellError::message: alloc::string::String
@@ -1719,13 +1901,14 @@ pub formualizer_workbook::IoError::Schema::source: core::option::Option<alloc::b
 pub formualizer_workbook::IoError::Unsupported
 pub formualizer_workbook::IoError::Unsupported::context: alloc::string::String
 pub formualizer_workbook::IoError::Unsupported::feature: alloc::string::String
+pub formualizer_workbook::IoError::XlsxRead(formualizer_workbook::XlsxReadError)
 impl formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from_backend<E: core::error::Error>(&str, E) -> Self
 pub fn formualizer_workbook::error::IoError::load_budget_exceeded(&str, &str, alloc::string::String) -> Self
-impl core::convert::From<calamine::errors::Error> for formualizer_workbook::error::IoError
-pub fn formualizer_workbook::error::IoError::from(calamine::errors::Error) -> Self
 impl core::convert::From<formualizer_common::error::ExcelError> for formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from(formualizer_common::error::ExcelError) -> Self
+impl core::convert::From<formualizer_workbook::XlsxReadError> for formualizer_workbook::error::IoError
+pub fn formualizer_workbook::error::IoError::from(formualizer_workbook::XlsxReadError) -> Self
 impl core::convert::From<serde_json::error::Error> for formualizer_workbook::error::IoError
 pub fn formualizer_workbook::error::IoError::from(serde_json::error::Error) -> Self
 impl core::convert::From<std::io::error::Error> for formualizer_workbook::error::IoError
@@ -1817,20 +2000,88 @@ impl core::clone::Clone for formualizer_workbook::transaction::WriteOp
 pub fn formualizer_workbook::transaction::WriteOp::clone(&self) -> formualizer_workbook::transaction::WriteOp
 impl core::fmt::Debug for formualizer_workbook::transaction::WriteOp
 pub fn formualizer_workbook::transaction::WriteOp::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum formualizer_workbook::XlsxError
+pub formualizer_workbook::XlsxError::Alphanumeric(u8)
+pub formualizer_workbook::XlsxError::CellError(alloc::string::String)
+pub formualizer_workbook::XlsxError::CellTAttribute(alloc::string::String)
+pub formualizer_workbook::XlsxError::ColumnNumberOverflow
+pub formualizer_workbook::XlsxError::DimensionCount(usize)
+pub formualizer_workbook::XlsxError::Encoding(quick_xml::encoding::EncodingError)
+pub formualizer_workbook::XlsxError::FileNotFound(alloc::string::String)
+pub formualizer_workbook::XlsxError::Io(std::io::error::Error)
+pub formualizer_workbook::XlsxError::NotAWorksheet(alloc::string::String)
+pub formualizer_workbook::XlsxError::NumericColumn(u8)
+pub formualizer_workbook::XlsxError::Parse(alloc::string::ParseError)
+pub formualizer_workbook::XlsxError::ParseFloat(core::num::dec2flt::ParseFloatError)
+pub formualizer_workbook::XlsxError::ParseInt(core::num::error::ParseIntError)
+pub formualizer_workbook::XlsxError::Password
+pub formualizer_workbook::XlsxError::PivotTableNotFound(alloc::string::String)
+pub formualizer_workbook::XlsxError::RangeWithoutColumnComponent
+pub formualizer_workbook::XlsxError::RangeWithoutRowComponent
+pub formualizer_workbook::XlsxError::RelationshipNotFound
+pub formualizer_workbook::XlsxError::RowNumberOverflow
+pub formualizer_workbook::XlsxError::TableNotFound(alloc::string::String)
+pub formualizer_workbook::XlsxError::Unexpected(&'static str)
+pub formualizer_workbook::XlsxError::UnexpectedNode(&'static str)
+pub formualizer_workbook::XlsxError::Unrecognized
+pub formualizer_workbook::XlsxError::Unrecognized::typ: &'static str
+pub formualizer_workbook::XlsxError::Unrecognized::val: alloc::string::String
+pub formualizer_workbook::XlsxError::WorksheetNotFound(alloc::string::String)
+pub formualizer_workbook::XlsxError::Xml(quick_xml::errors::Error)
+pub formualizer_workbook::XlsxError::XmlAttr(quick_xml::events::attributes::AttrError)
+pub formualizer_workbook::XlsxError::XmlEof(&'static str)
+pub formualizer_workbook::XlsxError::Zip(zip::result::ZipError)
+impl core::convert::From<core::num::dec2flt::ParseFloatError> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(core::num::dec2flt::ParseFloatError) -> Self
+impl core::convert::From<core::num::error::ParseIntError> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(core::num::error::ParseIntError) -> Self
+impl core::convert::From<formualizer_workbook::XlsxError> for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::from(formualizer_workbook::XlsxError) -> Self
+impl core::convert::From<quick_xml::encoding::EncodingError> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(quick_xml::encoding::EncodingError) -> Self
+impl core::convert::From<quick_xml::errors::Error> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(quick_xml::errors::Error) -> Self
+impl core::convert::From<quick_xml::events::attributes::AttrError> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(quick_xml::events::attributes::AttrError) -> Self
+impl core::convert::From<std::io::error::Error> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(std::io::error::Error) -> Self
+impl core::convert::From<zip::result::ZipError> for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::from(zip::result::ZipError) -> Self
+impl core::error::Error for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for formualizer_workbook::XlsxError
+pub fn formualizer_workbook::XlsxError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum formualizer_workbook::XlsxPathSource
 pub formualizer_workbook::XlsxPathSource::DirectMmap
 pub formualizer_workbook::XlsxPathSource::SharedFile
-impl core::clone::Clone for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::clone(&self) -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::Eq for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::cmp::PartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::eq(&self, &formualizer_workbook::backends::calamine::XlsxPathSource) -> bool
-impl core::default::Default for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::default() -> formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::fmt::Debug for formualizer_workbook::backends::calamine::XlsxPathSource
-pub fn formualizer_workbook::backends::calamine::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for formualizer_workbook::backends::calamine::XlsxPathSource
-impl core::marker::StructuralPartialEq for formualizer_workbook::backends::calamine::XlsxPathSource
+impl core::clone::Clone for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::clone(&self) -> formualizer_workbook::XlsxPathSource
+impl core::cmp::Eq for formualizer_workbook::XlsxPathSource
+impl core::cmp::PartialEq for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::eq(&self, &formualizer_workbook::XlsxPathSource) -> bool
+impl core::default::Default for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::default() -> formualizer_workbook::XlsxPathSource
+impl core::fmt::Debug for formualizer_workbook::XlsxPathSource
+pub fn formualizer_workbook::XlsxPathSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for formualizer_workbook::XlsxPathSource
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxPathSource
+pub enum formualizer_workbook::XlsxReadError
+pub formualizer_workbook::XlsxReadError::Io(std::io::error::Error)
+pub formualizer_workbook::XlsxReadError::Xlsx(formualizer_workbook::XlsxError)
+impl core::convert::From<formualizer_workbook::XlsxError> for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::from(formualizer_workbook::XlsxError) -> Self
+impl core::convert::From<formualizer_workbook::XlsxReadError> for formualizer_workbook::error::IoError
+pub fn formualizer_workbook::error::IoError::from(formualizer_workbook::XlsxReadError) -> Self
+impl core::convert::From<std::io::error::Error> for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::from(std::io::error::Error) -> Self
+impl core::error::Error for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for formualizer_workbook::XlsxReadError
+pub fn formualizer_workbook::XlsxReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct formualizer_workbook::AdapterLoadStats
 pub formualizer_workbook::AdapterLoadStats::formula_cells_handed_to_engine: core::option::Option<u64>
 pub formualizer_workbook::AdapterLoadStats::formula_cells_observed: core::option::Option<u64>
@@ -1870,30 +2121,37 @@ impl core::default::Default for formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::traits::BackendCaps::default() -> formualizer_workbook::traits::BackendCaps
 impl core::fmt::Debug for formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::traits::BackendCaps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct formualizer_workbook::CachedExternalLinkValues
 pub struct formualizer_workbook::CalamineAdapter
-impl formualizer_workbook::backends::calamine::CalamineAdapter
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::external_link_target(&self, u32) -> core::option::Option<&str>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, calamine::errors::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::backends::calamine::XlsxPathSource) -> core::result::Result<Self, calamine::errors::Error>
-impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::calamine::CalamineAdapter
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
-impl<R> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::backends::calamine::CalamineAdapter where R: formualizer_eval::traits::EvaluationContext
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), Self::Error>
+impl formualizer_workbook::CalamineAdapter
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable_with_limits(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_with_limits(alloc::vec::Vec<u8>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source_and_limits<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader_with_limits(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
+impl<R: formualizer_eval::traits::EvaluationContext> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub struct formualizer_workbook::CalcSettings
 pub formualizer_workbook::CalcSettings::calc_mode: core::option::Option<alloc::string::String>
 pub formualizer_workbook::CalcSettings::full_calc_on_load: core::option::Option<bool>
@@ -1937,11 +2195,13 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::csv::CsvAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::csv::CsvAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::csv::CsvAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::csv::CsvAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -1949,6 +2209,7 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::read_cell(&mut self, &st
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
@@ -2070,11 +2331,13 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::default() -> Self
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::json::JsonAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::json::JsonAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::json::JsonAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::json::JsonAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::json::JsonAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::json::JsonAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2082,6 +2345,7 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
@@ -2136,10 +2400,41 @@ impl serde_core::ser::Serialize for formualizer_workbook::traits::NamedRange
 pub fn formualizer_workbook::traits::NamedRange::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for formualizer_workbook::traits::NamedRange
 pub fn formualizer_workbook::traits::NamedRange::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct formualizer_workbook::NativeXlsxAdapter
+impl formualizer_workbook::CalamineAdapter
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_cancellable_with_limits(alloc::vec::Vec<u8>, formualizer_eval::engine::cancel::CancelToken, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes_with_limits(alloc::vec::Vec<u8>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path_with_source_and_limits<P: core::convert::AsRef<std::path::Path>>(P, formualizer_workbook::XlsxPathSource, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader_with_limits(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>, formualizer_workbook::XlsxLoadLimits) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
+impl<R: formualizer_eval::traits::EvaluationContext> formualizer_eval::engine::ingest::EngineLoadStream<R> for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::stream_into_engine(&mut self, &mut formualizer_eval::engine::eval::Engine<R>) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub struct formualizer_workbook::RecalculateErrorSummary
 pub formualizer_workbook::RecalculateErrorSummary::count: usize
 pub formualizer_workbook::RecalculateErrorSummary::locations: alloc::vec::Vec<alloc::string::String>
 pub formualizer_workbook::RecalculateErrorSummary::locations_truncated: usize
+pub formualizer_workbook::RecalculateErrorSummary::messages: alloc::vec::Vec<core::option::Option<alloc::string::String>>
 impl core::clone::Clone for formualizer_workbook::recalculate::RecalculateErrorSummary
 pub fn formualizer_workbook::recalculate::RecalculateErrorSummary::clone(&self) -> formualizer_workbook::recalculate::RecalculateErrorSummary
 impl core::cmp::Eq for formualizer_workbook::recalculate::RecalculateErrorSummary
@@ -2169,6 +2464,7 @@ pub formualizer_workbook::RecalculateSummary::errors: usize
 pub formualizer_workbook::RecalculateSummary::evaluated: usize
 pub formualizer_workbook::RecalculateSummary::sheets: alloc::collections::btree::map::BTreeMap<alloc::string::String, formualizer_workbook::recalculate::RecalculateSheetSummary>
 pub formualizer_workbook::RecalculateSummary::status: formualizer_workbook::recalculate::RecalculateStatus
+pub formualizer_workbook::RecalculateSummary::unknown_functions: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
 impl formualizer_workbook::recalculate::RecalculateSummary
 pub fn formualizer_workbook::recalculate::RecalculateSummary::has_errors(&self) -> bool
 impl core::clone::Clone for formualizer_workbook::recalculate::RecalculateSummary
@@ -2220,11 +2516,13 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::write_formula_caches_
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2232,6 +2530,7 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_cell(&mut self, 
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -2261,11 +2560,13 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::write_formula_caches_b
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2273,6 +2574,7 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetWriter for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
@@ -2434,6 +2736,7 @@ pub fn formualizer_workbook::workbook::Workbook::bind_wasm_function(&mut self, &
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan(&self) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan_for_targets(&mut self, &[formualizer_eval::engine::target_preparation::EvaluationTarget]) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::build_recalc_plan_for_targets_with_options(&mut self, &[formualizer_eval::engine::target_preparation::EvaluationTarget], formualizer_eval::engine::target_preparation::TargetEvalOptions<'_>) -> core::result::Result<formualizer_eval::engine::eval::RecalcPlan, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::workbook::Workbook::cached_external_link_indices(&self) -> &[usize]
 pub fn formualizer_workbook::workbook::Workbook::changelog(&self) -> &formualizer_eval::engine::graph::editor::change_log::ChangeLog
 pub fn formualizer_workbook::workbook::Workbook::define_named_range(&mut self, &str, &formualizer_common::range::RangeAddress, formualizer_workbook::traits::NamedRangeScope) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::define_table(&mut self, &str, &str, (u32, u32, u32, u32), alloc::vec::Vec<alloc::string::String>, bool, bool) -> core::result::Result<(), formualizer_common::error::ExcelError>
@@ -2483,6 +2786,7 @@ pub fn formualizer_workbook::workbook::Workbook::last_formula_ingest_report(&sel
 pub fn formualizer_workbook::workbook::Workbook::list_custom_functions(&self) -> alloc::vec::Vec<formualizer_workbook::workbook::CustomFnInfo>
 pub fn formualizer_workbook::workbook::Workbook::list_wasm_modules(&self) -> alloc::vec::Vec<formualizer_workbook::workbook::WasmModuleInfo>
 pub fn formualizer_workbook::workbook::Workbook::loaded_calc_settings(&self) -> core::option::Option<&formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::workbook::Workbook::name_import_diagnostics(&self) -> &[formualizer_workbook::traits::NameImportDiagnostic]
 pub fn formualizer_workbook::workbook::Workbook::named_range_address(&self, &str) -> core::option::Option<formualizer_common::range::RangeAddress>
 pub fn formualizer_workbook::workbook::Workbook::new() -> Self
 pub fn formualizer_workbook::workbook::Workbook::new_with_config(formualizer_workbook::workbook::WorkbookConfig) -> Self
@@ -2511,6 +2815,7 @@ pub fn formualizer_workbook::workbook::Workbook::set_rows_hidden(&mut self, &str
 pub fn formualizer_workbook::workbook::Workbook::set_value(&mut self, &str, u32, u32, formualizer_common::value::LiteralValue) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::set_values(&mut self, &str, u32, u32, &[alloc::vec::Vec<formualizer_common::value::LiteralValue>]) -> core::result::Result<(), formualizer_workbook::error::IoError>
 pub fn formualizer_workbook::workbook::Workbook::sheet_dimensions(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::workbook::Workbook::sheet_import_diagnostics(&self) -> &[formualizer_workbook::traits::SheetImportDiagnostic]
 pub fn formualizer_workbook::workbook::Workbook::sheet_names(&self) -> alloc::vec::Vec<alloc::string::String>
 pub fn formualizer_workbook::workbook::Workbook::table_metadata(&self, &str) -> core::option::Option<formualizer_eval::engine::eval::TableMetadata>
 pub fn formualizer_workbook::workbook::Workbook::tables(&self) -> alloc::vec::Vec<formualizer_eval::engine::eval::TableMetadata>
@@ -2582,6 +2887,22 @@ pub fn formualizer_workbook::transaction::WriteTransaction<'a, W>::write_cell(&m
 pub fn formualizer_workbook::transaction::WriteTransaction<'a, W>::write_range(&mut self, &str, alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>) -> &mut Self
 impl<'a, W: formualizer_workbook::traits::SpreadsheetWriter> core::ops::drop::Drop for formualizer_workbook::transaction::WriteTransaction<'a, W>
 pub fn formualizer_workbook::transaction::WriteTransaction<'a, W>::drop(&mut self)
+pub struct formualizer_workbook::XlsxLoadLimits
+pub formualizer_workbook::XlsxLoadLimits::max_entries: usize
+pub formualizer_workbook::XlsxLoadLimits::max_expanded_bytes: usize
+pub formualizer_workbook::XlsxLoadLimits::max_input_bytes: usize
+pub formualizer_workbook::XlsxLoadLimits::max_part_bytes: usize
+pub formualizer_workbook::XlsxLoadLimits::max_xml_depth: usize
+impl core::clone::Clone for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::clone(&self) -> formualizer_workbook::XlsxLoadLimits
+impl core::cmp::Eq for formualizer_workbook::XlsxLoadLimits
+impl core::cmp::PartialEq for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::eq(&self, &formualizer_workbook::XlsxLoadLimits) -> bool
+impl core::default::Default for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::default() -> Self
+impl core::fmt::Debug for formualizer_workbook::XlsxLoadLimits
+pub fn formualizer_workbook::XlsxLoadLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for formualizer_workbook::XlsxLoadLimits
 pub struct formualizer_workbook::XlsxRecalculateLimits
 pub formualizer_workbook::XlsxRecalculateLimits::max_cells: usize
 pub formualizer_workbook::XlsxRecalculateLimits::max_columns: u32
@@ -2602,6 +2923,7 @@ pub struct formualizer_workbook::XlsxRecalculateOptions
 pub formualizer_workbook::XlsxRecalculateOptions::cancel: core::option::Option<formualizer_eval::engine::cancel::CancelToken>
 pub formualizer_workbook::XlsxRecalculateOptions::error_location_limit: usize
 pub formualizer_workbook::XlsxRecalculateOptions::eval_config: formualizer_eval::engine::EvalConfig
+pub formualizer_workbook::XlsxRecalculateOptions::external_links: formualizer_workbook::cache_recalculate::ExternalLinkPolicy
 pub formualizer_workbook::XlsxRecalculateOptions::limits: formualizer_workbook::cache_recalculate::XlsxRecalculateLimits
 impl core::clone::Clone for formualizer_workbook::cache_recalculate::XlsxRecalculateOptions
 pub fn formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::clone(&self) -> formualizer_workbook::cache_recalculate::XlsxRecalculateOptions
@@ -2612,6 +2934,8 @@ pub fn formualizer_workbook::cache_recalculate::XlsxRecalculateOptions::fmt(&sel
 pub struct formualizer_workbook::XlsxRecalculateResult
 pub formualizer_workbook::XlsxRecalculateResult::bytes: alloc::vec::Vec<u8>
 pub formualizer_workbook::XlsxRecalculateResult::cache_cells_changed: usize
+pub formualizer_workbook::XlsxRecalculateResult::clock_now_utc: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub formualizer_workbook::XlsxRecalculateResult::external_links_used: usize
 pub formualizer_workbook::XlsxRecalculateResult::formula_cells: usize
 pub formualizer_workbook::XlsxRecalculateResult::summary: formualizer_workbook::recalculate::RecalculateSummary
 pub formualizer_workbook::XlsxRecalculateResult::worksheet_parts_changed: usize
@@ -2634,11 +2958,13 @@ pub trait formualizer_workbook::SpreadsheetIO: formualizer_workbook::traits::Spr
 pub trait formualizer_workbook::SpreadsheetReader: core::marker::Send + core::marker::Sync
 pub type formualizer_workbook::SpreadsheetReader::Error: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn formualizer_workbook::SpreadsheetReader::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::SpreadsheetReader::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::SpreadsheetReader::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::SpreadsheetReader::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::SpreadsheetReader::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::SpreadsheetReader::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::SpreadsheetReader::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::SpreadsheetReader::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::SpreadsheetReader::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::SpreadsheetReader::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::SpreadsheetReader::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2646,31 +2972,37 @@ pub fn formualizer_workbook::SpreadsheetReader::read_cell(&mut self, &str, u32, 
 pub fn formualizer_workbook::SpreadsheetReader::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::SpreadsheetReader::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::SpreadsheetReader::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::SpreadsheetReader::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::SpreadsheetReader::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
-impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::calamine::CalamineAdapter
-pub type formualizer_workbook::backends::calamine::CalamineAdapter::Error = calamine::errors::Error
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
-pub fn formualizer_workbook::backends::calamine::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
+impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::CalamineAdapter
+pub type formualizer_workbook::CalamineAdapter::Error = formualizer_workbook::error::IoError
+pub fn formualizer_workbook::CalamineAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::CalamineAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
+pub fn formualizer_workbook::CalamineAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
+pub fn formualizer_workbook::CalamineAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
+pub fn formualizer_workbook::CalamineAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
+pub fn formualizer_workbook::CalamineAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::CalamineAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_cell(&mut self, &str, u32, u32) -> core::result::Result<core::option::Option<formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, formualizer_workbook::error::IoError>
+pub fn formualizer_workbook::CalamineAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::CalamineAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
+pub fn formualizer_workbook::CalamineAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, formualizer_workbook::error::IoError>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::csv::CsvAdapter
 pub type formualizer_workbook::backends::csv::CsvAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::csv::CsvAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::csv::CsvAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::csv::CsvAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::csv::CsvAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::csv::CsvAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2678,15 +3010,18 @@ pub fn formualizer_workbook::backends::csv::CsvAdapter::read_cell(&mut self, &st
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::csv::CsvAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::json::JsonAdapter
 pub type formualizer_workbook::backends::json::JsonAdapter::Error = formualizer_workbook::error::IoError
 pub fn formualizer_workbook::backends::json::JsonAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::json::JsonAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::json::JsonAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::json::JsonAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::json::JsonAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::json::JsonAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::json::JsonAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::json::JsonAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2694,15 +3029,18 @@ pub fn formualizer_workbook::backends::json::JsonAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::json::JsonAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya3::UmyaAdapter
 pub type formualizer_workbook::backends::umya3::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2710,15 +3048,18 @@ pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_cell(&mut self, 
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya3::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 impl formualizer_workbook::traits::SpreadsheetReader for formualizer_workbook::backends::umya::UmyaAdapter
 pub type formualizer_workbook::backends::umya::UmyaAdapter::Error = umya_spreadsheet::structs::error::XlsxError
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::access_granularity(&self) -> formualizer_workbook::traits::AccessGranularity
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::cached_external_link_values(&mut self) -> core::option::Option<alloc::sync::Arc<formualizer_workbook::CachedExternalLinkValues>>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::calc_settings(&self) -> core::option::Option<formualizer_workbook::traits::CalcSettings>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::capabilities(&self) -> formualizer_workbook::traits::BackendCaps
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::defined_names(&mut self) -> core::result::Result<alloc::vec::Vec<formualizer_workbook::traits::DefinedName>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::is_loaded(&self, &str, core::option::Option<u32>, core::option::Option<u32>) -> bool
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::load_stats(&self) -> core::option::Option<formualizer_workbook::traits::AdapterLoadStats>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::name_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::NameImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_bytes(alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_path<P: core::convert::AsRef<std::path::Path>>(P) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::open_reader(alloc::boxed::Box<(dyn std::io::Read + core::marker::Send + core::marker::Sync)>) -> core::result::Result<Self, Self::Error> where Self: core::marker::Sized
@@ -2726,6 +3067,7 @@ pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_cell(&mut self, &
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_range(&mut self, &str, (u32, u32), (u32, u32)) -> core::result::Result<alloc::collections::btree::map::BTreeMap<(u32, u32), formualizer_workbook::traits::CellData>, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::read_sheet(&mut self, &str) -> core::result::Result<formualizer_workbook::traits::SheetData, Self::Error>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_bounds(&self, &str) -> core::option::Option<(u32, u32)>
+pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_import_diagnostics(&self) -> alloc::vec::Vec<formualizer_workbook::traits::SheetImportDiagnostic>
 pub fn formualizer_workbook::backends::umya::UmyaAdapter::sheet_names(&self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, Self::Error>
 pub trait formualizer_workbook::SpreadsheetWriter: core::marker::Send + core::marker::Sync
 pub type formualizer_workbook::SpreadsheetWriter::Error: core::error::Error + core::marker::Send + core::marker::Sync + 'static

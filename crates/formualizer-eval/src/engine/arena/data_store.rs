@@ -317,6 +317,18 @@ impl DataStore {
         self.asts.resolve_string(id)
     }
 
+    pub(crate) fn sheet_names(&self) -> impl Iterator<Item = StringId> + '_ {
+        self.asts.sheet_names()
+    }
+
+    pub(crate) fn function_names(&self) -> impl Iterator<Item = StringId> + '_ {
+        self.asts.function_names()
+    }
+
+    pub(crate) fn resolution_revision(&self) -> u64 {
+        self.asts.resolution_revision()
+    }
+
     pub(crate) fn ast_strings(&self) -> &StringInterner {
         self.asts.strings()
     }
@@ -341,8 +353,33 @@ impl DataStore {
         self.asts.node_count()
     }
 
-    pub fn get_node(&self, id: AstNodeId) -> Option<&super::ast::AstNodeData> {
+    pub(crate) fn expanded_node(&self, id: AstNodeId) -> Option<super::ast::AstNodeData> {
+        self.asts.get(id).map(|node| self.asts.expand_node(node))
+    }
+
+    /// See [`super::ast::AstArena::get_compact_ref`].
+    pub fn get_compact_ref(&self, id: super::ast::RefId) -> Option<&CompactRefType> {
+        self.asts.get_compact_ref(id)
+    }
+
+    pub(crate) fn compact_ref(&self, id: super::ast::RefId) -> &CompactRefType {
+        self.asts.compact_ref(id)
+    }
+
+    pub fn get_node(&self, id: AstNodeId) -> Option<&super::ast::AstNodeData<super::ast::RefId>> {
         self.asts.get(id)
+    }
+
+    /// SUBTOTAL/AGGREGATE call bits of the formula rooted at `id` (see
+    /// `AstNodeEntry::subtotal_calls`).
+    pub(crate) fn ast_subtotal_calls(&self, id: AstNodeId) -> u8 {
+        self.asts.subtotal_calls(id) & (super::ast::SUBTOTAL_CALL | super::ast::AGGREGATE_CALL)
+    }
+
+    /// Conservative visibility guard metadata, including dotted reducer names.
+    /// Unlike `ast_subtotal_calls`, this is not a nested-evaluation policy.
+    pub(crate) fn ast_calls_visibility_reducer(&self, id: AstNodeId) -> bool {
+        self.asts.subtotal_calls(id) != 0
     }
 
     pub fn get_args(&self, id: AstNodeId) -> Option<&[AstNodeId]> {
@@ -361,6 +398,7 @@ impl DataStore {
             };
             match node {
                 super::ast::AstNodeData::Reference { ref_type, .. } => {
+                    let ref_type = self.compact_ref(*ref_type);
                     if let CompactRefType::Table { name_id, .. } = ref_type
                         && self.resolve_ast_string(*name_id).is_empty()
                     {
@@ -410,13 +448,13 @@ impl DataStore {
 
             ASTNodeType::UnaryOp { op, expr } => {
                 let expr_id = self.convert_ast_node(expr, sheet_registry);
-                self.asts.insert_unary_op(op, expr_id)
+                self.asts.insert_unary_op(*op, expr_id)
             }
 
             ASTNodeType::BinaryOp { op, left, right } => {
                 let left_id = self.convert_ast_node(left, sheet_registry);
                 let right_id = self.convert_ast_node(right, sheet_registry);
-                self.asts.insert_binary_op(op, left_id, right_id)
+                self.asts.insert_binary_op(*op, left_id, right_id)
             }
 
             ASTNodeType::Function { name, args } => {
@@ -622,25 +660,26 @@ impl DataStore {
                 ref_type,
             } => {
                 let original = self.asts.resolve_string(*original_id).to_string();
-                let reference = self.reconstruct_reference_type(ref_type, sheet_registry);
+                let reference =
+                    self.reconstruct_reference_type(self.compact_ref(*ref_type), sheet_registry);
                 ASTNodeType::Reference {
                     original,
                     reference,
                 }
             }
 
-            AstNodeData::UnaryOp { op_id, expr_id } => {
-                let op = self.asts.resolve_string(*op_id).to_string();
+            AstNodeData::UnaryOp { operator, expr_id } => {
+                let op = *operator;
                 let expr = Box::new(self.reconstruct_ast_node(*expr_id, sheet_registry)?);
                 ASTNodeType::UnaryOp { op, expr }
             }
 
             AstNodeData::BinaryOp {
-                op_id,
+                operator,
                 left_id,
                 right_id,
             } => {
-                let op = self.asts.resolve_string(*op_id).to_string();
+                let op = *operator;
                 let left = Box::new(self.reconstruct_ast_node(*left_id, sheet_registry)?);
                 let right = Box::new(self.reconstruct_ast_node(*right_id, sheet_registry)?);
                 ASTNodeType::BinaryOp { op, left, right }
@@ -939,6 +978,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn visibility_reducer_prefixes_do_not_change_legacy_nested_skip_bits() {
+        let mut store = DataStore::new();
+        let registry = SheetRegistry::new();
+        for (formula, legacy) in [
+            ("=SUBTOTAL(9,1)", 1),
+            ("=_xlfn.SUBTOTAL(9,1)", 1),
+            ("=AGGREGATE(9,0,1)", 2),
+            ("=1+_xlws._xlfn.SUBTOTAL(109,1)", 0),
+            ("=_xll.AGGREGATE(9,0,1)", 0),
+            ("=FOO.SUBTOTAL(9,1)", 0),
+        ] {
+            let ast = formualizer_parse::parser::parse(formula).unwrap();
+            let id = store.store_ast(&ast, &registry);
+            assert!(store.ast_calls_visibility_reducer(id), "{formula}");
+            assert_eq!(store.ast_subtotal_calls(id), legacy, "{formula}");
+        }
+    }
+
+    #[test]
     fn test_data_store_empty_value() {
         let mut store = DataStore::new();
         let value_ref = store.store_value(LiteralValue::Empty);
@@ -1059,7 +1117,7 @@ mod tests {
 
         let ast = ASTNode {
             node_type: ASTNodeType::BinaryOp {
-                op: "+".to_string(),
+                op: formualizer_parse::BinaryOperator::Add,
                 left: Box::new(ASTNode {
                     node_type: ASTNodeType::Literal(LiteralValue::Number(1.0)),
                     source_token: None,
@@ -1080,7 +1138,7 @@ mod tests {
 
         match retrieved.node_type {
             ASTNodeType::BinaryOp { op, left, right } => {
-                assert_eq!(op, "+");
+                assert_eq!(op.as_str(), "+");
                 match left.node_type {
                     ASTNodeType::Literal(lit) => assert_eq!(lit, LiteralValue::Number(1.0)),
                     _ => panic!("Expected literal"),

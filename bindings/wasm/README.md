@@ -13,12 +13,16 @@
 
 **The fastest open-source spreadsheet engine. In your JavaScript app.**
 
+The shared Rust engine calculates a million-formula financial model in **0.26 seconds**. [See the benchmarks](https://github.com/psu3d0/formualizer#how-fast).
+
 Load Excel workbooks, change inputs, recalculate and read results—in the browser, Node.js or a compatible JavaScript edge runtime. Formualizer ships a Rust calculation engine as WebAssembly with a typed JavaScript API. No Excel installation, office-suite process or remote calculation service. Built for AI agents and applications that need spreadsheet logic without a spreadsheet UI.
 
 - **No compromise on speed.** Copied formulas compute as families over Arrow columns; lookups reuse indexes; only affected cells recalculate. The [engine benchmarks](https://github.com/psu3d0/formualizer#how-fast) report native measurements, not browser or edge timings.
 - **Excel-compatible.** 400+ functions, dynamic arrays, `LET`, `LAMBDA`, names and cross-sheet references. Load XLSX bytes and calculate formulas, not just read cached values.
 - **Built for agents.** Inspect dependencies, group edits with undo/redo, and expose deterministic typed inputs and outputs through SheetPort. For ready-made CLI and MCP tools, see [agent-spreadsheet](https://github.com/PSU3D0/agent-spreadsheet).
 - **One engine across languages.** Also available for [Rust and Python](https://github.com/psu3d0/formualizer#bindings). This npm package targets JavaScript hosts; non-JavaScript WASM hosts use the [portable Rust profile](#runtime-profile).
+
+> This package is the WebAssembly library. The `formualizer recalc` command-line tool is the separate native package [`@formualizer/cli`](https://www.npmjs.com/package/@formualizer/cli) (`npx @formualizer/cli recalc book.xlsx`); it is not included here.
 
 ## Installation
 
@@ -75,6 +79,21 @@ console.log(wb.sheet('Summary').getValue(5, 2)); // B5
 
 For Node.js, read the bytes with `readFile` from `node:fs/promises` instead of `fetch`. Initialization and WASM asset loading depend on your runtime and bundler; see the [JS quickstart](https://www.formualizer.dev/docs/quickstarts/js-wasm-quickstart). Calculation methods are synchronous: use a Web Worker for large browser workloads to keep the UI responsive.
 
+Native is the default XLSX reader. `backend: 'calamine'` remains a native compatibility alias. The raw WASM API accepts the same options through `Workbook.fromXlsxBytesWithOptions`. Native reading requires `xlsx-recalc` (included in default builds); it does not enable XLSX writing.
+
+```ts
+const wb = Workbook.fromXlsxBytes(bytes, {
+  loadLimits: {
+    maxInputBytes: 16 * 1024 * 1024,
+    maxPartBytes: 32 * 1024 * 1024,
+  },
+});
+```
+
+`loadLimits` has exactly five optional numeric fields: `maxInputBytes`, `maxEntries`, `maxExpandedBytes`, `maxPartBytes`, and `maxXmlDepth`. Omitted fields inherit Rust defaults: **127 MiB** compressed input (133,169,152 bytes), 10,000 ZIP entries, 256 MiB aggregate actual consumed output, 128 MiB per consumed part, and XML depth 128. Zero means zero allowance. Unknown nested keys and values other than non-negative safe integers within the host allocation width are rejected (on wasm32, at most 2,147,483,647). Explicit `loadLimits`, including `{}`, is unsupported for JSON loading and empty Workbook construction.
+
+Ordinary loading selectively reads required parts: an unread image/attachment is not decompressed or CRC-validated; corrupt required parts still fail. This is not whole-file integrity validation. Raising a limit is an explicit resource opt-in, not a guarantee that a workbook fits browser memory. These limits do not replace engine/model/host memory bounds and cannot avoid the inbound JS-to-WASM byte transfer allocation. Strict XLSX recalculation keeps its separate limits and integrity rules.
+
 ### Cache-only XLSX recalculation
 
 ```typescript
@@ -84,12 +103,88 @@ const input = new Uint8Array(await (await fetch('/model.xlsx')).arrayBuffer());
 const result = await recalculateXlsxBytes(input);
 console.log(result.summary.status, result.cache_cells_changed);
 // `result.bytes` is a Uint8Array ready for download/upload.
+
+// Reproducible TODAY/NOW and RAND (the CLI's --now/--tz/--seed):
+const fixed = await recalculateXlsxBytes(input, undefined, {
+  deterministicTimestampUtc: '2026-01-31T09:00:00Z',
+  deterministicTimezone: '+01:00', // default 'utc'
+  rngSeed: 7,
+});
+console.log(fixed.clock, fixed.seed); // what the run used; seed is a bigint
 ```
+
+`RAND` is reproducible by default. Without `deterministicTimestampUtc`,
+`TODAY`/`NOW` use the host's local time; `result.clock.now` reports the instant
+they saw.
 
 This delegates to the shared Rust cache-only XLSX recalculator: formula text and
 unrelated package members are retained, while formula cached values are updated.
 Safe core resource limits apply; `errorLocationLimit` only limits stored error
 locations.
+
+Supported inputs include ordinary/shared scalar formulas, supported calculation
+names, new multi-cell spills from ordinary non-shared formulas, and existing
+XLDAPR anchors with validated `cm`/array-`ref` metadata. Growth, shrink, collapse
+and blocked anchors are supported, with readers `A1#` and
+`_xlfn.ANCHORARRAY(A1)`. Source-declared children are generated caches, not
+independent inputs: externally edited child values are recalculated while their
+ownership remains declared. Obsolete caches are cleared while styles remain.
+
+`formula_cells` and `summary.evaluated` count source formulas/anchors, not
+children. `cache_cells_changed` counts physical caches inserted, replaced or
+cleared, including children, and may exceed `formula_cells`.
+`worksheet_parts_changed` counts worksheets only, not metadata/relationships.
+`external_links` (`{ links_used, refreshed: false, policy: 'cached' }`) is
+present only when formulas read external workbook links; their values come from
+the cache Excel stored in the workbook and are never refreshed. Pass
+`{ externalLinks: 'refuse' }` (default `'cached'`, like the CLI's
+`--external-links`) to reject such workbooks instead; the policy is decided
+after calculation and nothing is returned. Workbooks whose links nothing reads
+still recalculate.
+Deterministic unchanged outputs recalculate to byte-identical no-ops.
+
+Legacy fixed-extent (CSE) arrays, elementwise `IF`, Excel tables within a
+validated subset, volatile functions and external links (read from the values
+cached in the workbook) are recalculated too. Data tables, unservable external
+references, rich/unknown or malformed metadata, hidden-row
+`SUBTOTAL`/`AGGREGATE` ranges, circular references, shared-family multi-cell
+spills and spill publication across merges are refused. Safe ZIP/XML/cell/output
+limits remain in effect. Fresh unmarked 1x1 results have no spill identity
+(`A1#` returns `#REF!`). No Excel-equivalence claim is made; no Excel execution
+oracle was used. See [the precise eligibility contract](https://github.com/psu3d0/formualizer/blob/main/docs/cache-only-xlsx.md).
+
+### SheetPort: a workbook as a typed function
+
+A manifest names the input and output cells with their types and constraints; the session validates inputs, recalculates and returns typed outputs. `defineManifest` fills in the boilerplate (spec version, shapes, `{ a1: ... }` locations) and returns the canonical manifest object, typed as `FioManifest`; `fromManifest` also accepts a hand-written canonical object.
+
+<!-- example: bindings/wasm/examples/sheetport-quickstart.mjs#readme -->
+```typescript
+import init, { Workbook, SheetPortSession, defineManifest } from 'formualizer';
+await init();
+
+// The model: B4 computes the monthly payment from B1:B3.
+const wb = new Workbook();
+wb.addSheet('Calculator');
+wb.setFormula('Calculator', 4, 2, '=PMT(B2/12, B3, -B1)');
+
+const manifest = defineManifest({
+  id: 'loan-calculator',
+  name: 'Loan calculator',
+  ports: [
+    { id: 'principal', dir: 'in', location: 'Calculator!B1', type: 'number', constraints: { min: 0 } },
+    { id: 'rate', dir: 'in', location: 'Calculator!B2', type: 'number' },
+    { id: 'term_months', dir: 'in', location: 'Calculator!B3', type: 'integer' },
+    { id: 'monthly_payment', dir: 'out', location: 'Calculator!B4', type: 'number' },
+  ],
+});
+
+const session = SheetPortSession.fromManifest(manifest, wb);
+session.writeInputs({ principal: 250000, rate: 0.045, term_months: 360 });
+const outputs = session.evaluateOnce({ freezeVolatile: true });
+console.log(outputs.monthly_payment); // 1266.71...
+```
+
+A rejected update throws an error whose `violations` name each failing port, and writes nothing. A port's `location` can also be a defined name (`{ name: 'Rate' }`) or the rows under a header (`{ layout: ... }`), and its `schema` a range, record or table instead of `type`. To ship the manifest as a file, load it with `SheetPortSession.fromManifestYaml(yaml, wb)`. See the [manifest format](https://www.formualizer.dev/docs/sheetport/manifest-format).
 
 ### Parse formulas
 
@@ -210,7 +305,7 @@ parse(formula: string, dialect?: FormulaDialect): Promise<ASTNodeData>
 | `unregisterFunction(name)` | Remove a previously registered custom function |
 | `listFunctions()` | List registered custom function metadata |
 | `static fromJson(json)` | Load workbook from JSON string |
-| `static fromXlsxBytes(bytes)` | Load workbook from XLSX bytes via the Calamine read path |
+| `static fromXlsxBytes(bytes, options?)` | Load XLSX bytes; `backend: 'native'` (default) or `'calamine'` (native alias) |
 | `static fromXlsxBytesWithOptions(bytes, options)` / `static fromJsonWithOptions(json, options)` | Same loaders with `WorkbookLoadOptions` |
 | `inspectCell(cell, options?)` / `precedents(...)` / `dependents(...)` / `trace(...)` / `rangePage(...)` | Inspection and dependency tracing |
 | `getEvalPlan(targets)` | Inspect the evaluation schedule before computing |
@@ -234,7 +329,8 @@ parse(formula: string, dialect?: FormulaDialect): Promise<ASTNodeData>
 
 | Method | Description |
 |---|---|
-| `static fromManifestYaml(yaml, workbook)` | Create session from YAML manifest |
+| `static fromManifest(manifest, workbook)` | Create a session from a manifest object (see `defineManifest`) |
+| `static fromManifestYaml(yaml, workbook)` | Create a session from a YAML manifest |
 | `manifest()` | Get the parsed manifest |
 | `describePorts()` | List all port definitions |
 | `readInputs()` | Read current input values |

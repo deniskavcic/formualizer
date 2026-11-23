@@ -37,6 +37,7 @@ pub(crate) mod result_finalization;
 pub mod row_visibility;
 pub mod scheduler;
 pub(crate) mod shape_memo;
+mod source_family;
 pub mod spill;
 mod target_preparation;
 #[doc(hidden)]
@@ -100,6 +101,8 @@ pub use formula_source::{
     SourceFamilyMembers, SourceFormulaFamily, SourceFormulaOrder, SourceRect,
 };
 pub use journal::{ActionJournal, ArrowOp, ArrowUndoBatch, GraphUndoBatch};
+#[doc(hidden)]
+pub use source_family::{SourceFamilyCounters, SourceFamilyMode, source_family_process_totals};
 #[allow(deprecated)]
 pub use target_preparation::PrepareTargetsOptions;
 // Use SoA implementation
@@ -154,9 +157,6 @@ pub mod fp8_parity_test_support {
     use crate::engine::template::canonical::{
         CanonicalRejectReason, CanonicalTemplateFlag, canonicalize_template,
     };
-    use crate::engine::template::dependency_summary::summarize_canonical_template;
-    use crate::engine::template::domain::{PlacementDomain, ResultRegion};
-    use crate::engine::template::read_summary::SpanReadSummary;
     use crate::reference::{CellRef, Coord};
     use crate::traits::EvaluationContext;
     use formualizer_common::{ExcelError, LiteralValue};
@@ -293,41 +293,11 @@ pub mod fp8_parity_test_support {
                     old.dynamic, new.dep_plan.dynamic,
                     "dynamic flag differs for {formula} at {placement:?}"
                 );
-                let mut expected_labels = canonical_labels_from_old(&old.labels);
-                if old.dynamic {
-                    expected_labels.flags |= CanonicalLabels::FLAG_DYNAMIC;
-                }
-                assert_eq!(
-                    expected_labels.flags, new.labels.flags,
-                    "canonical label flags differ for {formula} at {placement:?}\nold={:?}\nnew={:#x}",
-                    old.labels.flags, new.labels.flags
-                );
-                assert_eq!(
-                    expected_labels.rejects, new.labels.rejects,
-                    "canonical label rejects differ for {formula} at {placement:?}\nold={:?}\nnew={:#x}",
-                    old.labels.reject_reasons, new.labels.rejects
-                );
-                // The passive summary oracle cannot resolve defined names, so
-                // a named formula that the ingest pipeline resolved to a
-                // concrete region is an intentional superset: old None / new
-                // Some is allowed exactly when the only blocking reason was a
-                // named reference.
-                let named_resolution_superset = old.summary_rejected_only_for_named_reference
-                    && old.read_summary_debug.is_none();
-                if !named_resolution_superset {
-                    assert_eq!(
-                        old.read_summary_debug,
-                        new.read_summary.as_ref().map(|s| format!("{s:?}")),
-                        "read summary differs for {formula} at {placement:?}"
-                    );
-                }
-                assert_eq!(new.formula_text.as_deref(), Some(formula));
-                assert_eq!(new.placement, placement);
                 Fp8ParityObservation {
                     formula: formula.to_string(),
                     placement,
                     old_payload: old.payload,
-                    new_hash: new.canonical_hash,
+                    new_hash: old.canonical_hash,
                 }
             }
             (Err(old), Err(new)) => {
@@ -355,14 +325,12 @@ pub mod fp8_parity_test_support {
     #[derive(Debug)]
     struct OldOutput {
         payload: String,
-        labels: crate::engine::template::canonical::CanonicalTemplateLabels,
         direct_cells: Vec<CellRef>,
         range_deps: Vec<crate::reference::SharedRangeRef<'static>>,
         unresolved_names: Vec<String>,
         volatile: bool,
         dynamic: bool,
-        read_summary_debug: Option<String>,
-        summary_rejected_only_for_named_reference: bool,
+        canonical_hash: u64,
     }
 
     fn old_path<R: EvaluationContext>(
@@ -377,39 +345,30 @@ pub mod fp8_parity_test_support {
         let dynamic = engine.graph.is_ast_dynamic(ast);
         let template =
             canonicalize_template(ast, placement.coord.row() + 1, placement.coord.col() + 1);
-        let summary = summarize_canonical_template(&template);
-        let scalar_domain = PlacementDomain::row_run(
-            placement.sheet_id,
-            placement.coord.row(),
-            placement.coord.row(),
-            placement.coord.col(),
+        // The metadata oracle resolves strings through the arena, just as the
+        // former ingest producer did after storing the rewritten tree.
+        engine.intern_formula_ast(ast);
+        let metadata = engine.ingest_pipeline().parity_metadata(ast, placement);
+        let mut expected = canonical_labels_from_old(&template.labels);
+        if dynamic {
+            expected.flags |= CanonicalLabels::FLAG_DYNAMIC;
+        }
+        assert_eq!(
+            expected.flags, metadata.labels.flags,
+            "canonical flags for {ast:?}"
         );
-        let result_region = ResultRegion::scalar_cells(scalar_domain);
-        let read_summary = SpanReadSummary::from_formula_summary(
-            placement.sheet_id,
-            &result_region,
-            &summary,
-            engine.graph.sheet_reg(),
-        )
-        .ok();
-        let summary_rejected_only_for_named_reference = !summary.reject_reasons.is_empty()
-            && summary.reject_reasons.iter().all(|reason| {
-                matches!(
-                    reason,
-                    crate::engine::template::dependency_summary::DependencyRejectReason
-                        ::NamedRangeUnsupported { .. }
-                )
-            });
+        assert_eq!(
+            expected.rejects, metadata.labels.rejects,
+            "canonical rejects for {ast:?}"
+        );
         Ok(OldOutput {
             payload: template.key.payload().to_string(),
-            labels: template.labels,
             direct_cells: sorted_cells(placeholders),
             range_deps: ranges,
             unresolved_names,
             volatile,
             dynamic,
-            read_summary_debug: read_summary.as_ref().map(|s| format!("{s:?}")),
-            summary_rejected_only_for_named_reference,
+            canonical_hash: metadata.canonical_hash,
         })
     }
 
@@ -570,12 +529,40 @@ impl<R: EvaluationContext> Engine<R> {
         {
             let record = FormulaIngestRecord::member(row, col, family.template, family.anchor);
             grouper.members += 1;
+            grouper.counters.parsed_members += 1;
             grouper.note(row0, col0, family);
             return record;
         }
         let ast_id = self.intern_formula_ast(ast);
         self.note_staged_formula(grouper, row, col, ast_id);
         FormulaIngestRecord::new(row, col, ast_id, formula_text)
+    }
+
+    /// How this engine stages formula text that may be a relocated copy of
+    /// a formula already parsed (see [`SourceFamilyMode`]).
+    #[doc(hidden)]
+    pub fn source_family_mode(&self) -> SourceFamilyMode {
+        self.source_family_mode
+    }
+
+    #[doc(hidden)]
+    pub fn set_source_family_mode(&mut self, mode: SourceFamilyMode) {
+        self.source_family_mode = mode;
+    }
+
+    /// Load-time staging counters accumulated by this engine.
+    #[doc(hidden)]
+    pub fn source_family_counters(&self) -> SourceFamilyCounters {
+        self.source_family_counters
+    }
+
+    /// Fold a finished sheet's staging counters into this engine's (and
+    /// the process') totals, and reset them.
+    #[doc(hidden)]
+    pub fn finish_family_grouper(&mut self, grouper: &mut FormulaFamilyGrouper) {
+        let counters = std::mem::take(&mut grouper.counters);
+        counters.publish();
+        self.source_family_counters.accumulate(&counters);
     }
 
     /// Record a formula interned without [`Self::stage_formula_ast`] (for
@@ -595,6 +582,7 @@ impl<R: EvaluationContext> Engine<R> {
                 template: ast_id,
                 anchor: (row0, col0),
                 rendered: None,
+                lexical: None,
             },
         );
     }
@@ -814,6 +802,28 @@ pub enum PreparationPolicy {
     BestEffort,
 }
 
+/// How the engine combines floating-point numbers where the order of
+/// operations changes the result: the reductions behind `SUM`, `AVERAGE` and
+/// the criteria sums, and Excel's own numeric adjustments.
+///
+/// Every other behaviour is the same under every profile, and results under a
+/// profile are the same on every platform, CPU and thread count.
+///
+/// Only [`NumericProfile::ExcelCompatible`] exists today. The enum is
+/// `#[non_exhaustive]` so that a faster profile can be added without a breaking
+/// change: one that sums in a fixed, documented block order that can be split
+/// across cores and vector lanes, and therefore differs from Excel in the last
+/// bits of some results. Each such difference will be listed on that variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NumericProfile {
+    /// Excel's results, bit for bit where Excel's order is known: sums add
+    /// one value at a time into one running total, arguments left to right
+    /// and each range row by row. A single reduction runs on one core.
+    #[default]
+    ExcelCompatible,
+}
+
 /// Configuration for the evaluation engine
 #[derive(Debug, Clone)]
 pub struct EvalConfig {
@@ -981,6 +991,9 @@ pub struct EvalConfig {
     /// the formula arena drops the unreachable trees. Formulas read back
     /// identically either way.
     pub formula_compression: bool,
+
+    /// How floating-point reductions are ordered (see [`NumericProfile`]).
+    pub numeric_profile: NumericProfile,
 }
 
 impl Default for EvalConfig {
@@ -1046,6 +1059,7 @@ impl Default for EvalConfig {
             family_kernels: true,
             family_lift: true,
             formula_compression: true,
+            numeric_profile: NumericProfile::ExcelCompatible,
         }
     }
 }

@@ -8,7 +8,6 @@ use formualizer_workbook::{
     CalamineAdapter, LoadStrategy, SpreadsheetReader, Workbook, WorkbookConfig,
 };
 use std::io::{Cursor, Read, Write};
-use std::sync::Arc;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -453,19 +452,6 @@ fn understated_formula_dimensions_xlsx() -> Vec<u8> {
     })
 }
 
-fn formula_roles_xlsx() -> Vec<u8> {
-    let mut book = umya_spreadsheet::new_file();
-    let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-    sheet.get_cell_mut("A1").set_formula("1+1");
-    sheet.get_cell_mut("B1").set_formula("2+2");
-    let mut original = Vec::new();
-    umya_spreadsheet::writer::xlsx::write_writer(&book, &mut original).unwrap();
-    rewrite_sheet_xml(original, |xml| {
-        xml.replace("<f>1+1</f>", "<f t=\"array\" ref=\"A1:A1\">1+1</f>")
-            .replace("<f>2+2</f>", "<f t=\"dataTable\" ref=\"B1:B1\">2+2</f>")
-    })
-}
-
 fn duplicate_formula_literal_xlsx(formula_first: bool) -> Vec<u8> {
     let mut book = umya_spreadsheet::new_file();
     book.get_sheet_by_name_mut("Sheet1")
@@ -498,22 +484,6 @@ fn cached_malformed_formula_xlsx() -> Vec<u8> {
         let xml = xml.replace("<f>1+1</f><v/>", "<f>1+</f><v>99</v>");
         assert!(xml.contains("<f>1+</f><v>99</v>"));
         xml
-    })
-}
-
-fn malformed_shared_attribute_xlsx(attribute: &str) -> Vec<u8> {
-    let mut book = umya_spreadsheet::new_file();
-    book.get_sheet_by_name_mut("Sheet1")
-        .unwrap()
-        .get_cell_mut("A1")
-        .set_formula("1+1");
-    let mut original = Vec::new();
-    umya_spreadsheet::writer::xlsx::write_writer(&book, &mut original).unwrap();
-    rewrite_sheet_xml(original, |xml| {
-        xml.replace(
-            "<f>1+1</f>",
-            &format!("<f t=\"shared\" {attribute}>1+1</f>"),
-        )
     })
 }
 
@@ -700,9 +670,9 @@ fn authoritative_eager_commits_clean_family_without_descendant_graph_materializa
 
     let report = engine.last_formula_ingest_report().unwrap();
     assert_eq!(report.formula_cells_seen, 100);
-    assert_eq!(report.source_formula_records_spooled, 100);
-    assert!(report.source_spool_encoded_bytes > 100);
-    assert!(report.source_spool_peak_memory_bytes > 0);
+    assert_eq!(report.source_formula_records_spooled, 0);
+    assert_eq!(report.source_spool_encoded_bytes, 0);
+    assert_eq!(report.source_spool_peak_memory_bytes, 0);
     assert_eq!(report.source_spool_spilled_bytes, 0);
     assert_eq!(
         engine.get_cell_value("Sheet1", 100, 2),
@@ -869,7 +839,7 @@ fn fragmented_relative_family_preserves_replay_values_lookup_edits_and_structure
     let report = direct.last_formula_ingest_report().unwrap();
     assert_eq!(report.source_partition_holes, 1, "{report:?}");
     assert_eq!(report.source_partition_ordinary_exceptions, 1, "{report:?}");
-    assert_eq!(report.source_spool_replays, 1, "{report:?}");
+    assert_eq!(report.source_spool_replays, 0, "{report:?}");
     let deferred_report = deferred.last_formula_ingest_report().unwrap();
     assert_eq!(deferred_report.source_spool_replays, 1);
 
@@ -1432,7 +1402,7 @@ fn deferred_selected_build_isolates_packages_and_replacement_invalidates_family(
 
 #[test]
 fn compressed_shadow_prepares_one_anchor_and_replays_every_cell_eager_and_deferred() {
-    let mut eager = None;
+    let mut eager: Option<formualizer_eval::engine::FormulaIngestReport> = None;
     for deferred in [false, true] {
         let config = EvalConfig {
             formula_plane_mode: FormulaPlaneMode::Shadow,
@@ -1450,8 +1420,19 @@ fn compressed_shadow_prepares_one_anchor_and_replays_every_cell_eager_and_deferr
         assert_eq!(report.graph_formula_cells_materialized, 100);
         assert_eq!(engine.baseline_stats().formula_plane_active_span_count, 0);
         if deferred {
-            assert_eq!(eager.as_ref(), Some(&report));
+            assert_eq!(report.source_spool_replays, 1);
+            assert!(report.source_spool_encoded_bytes > 0);
+            let mut expected = eager.as_ref().unwrap().clone();
+            expected.source_formula_records_spooled = report.source_formula_records_spooled;
+            expected.source_spool_encoded_bytes = report.source_spool_encoded_bytes;
+            expected.source_spool_peak_memory_bytes = report.source_spool_peak_memory_bytes;
+            expected.source_spool_spilled_bytes = report.source_spool_spilled_bytes;
+            expected.source_spool_spill_files = report.source_spool_spill_files;
+            expected.source_spool_replays = report.source_spool_replays;
+            assert_eq!(expected, report);
         } else {
+            assert_eq!(report.source_spool_replays, 0);
+            assert_eq!(report.source_spool_encoded_bytes, 0);
             eager = Some(report);
         }
     }
@@ -1484,53 +1465,6 @@ fn calamine_expansion_matches_anchor_relocation_ast_at_domain_corners() {
                 .unwrap()
                 .fingerprint(),
             "row={row}, canonical={expanded}"
-        );
-    }
-}
-
-#[test]
-fn injected_calamine_arena_relocation_mismatch_replays_complete_shadow_family() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let comparisons = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&comparisons);
-    let mut adapter =
-        CalamineAdapter::open_bytes(large_shared_vertical_xlsx(100, "ABS(A1)+1")).unwrap();
-    adapter.set_shadow_relocation_comparator_for_test(move |expanded, relocated| {
-        assert_eq!(expanded.fingerprint(), relocated.fingerprint());
-        observed.fetch_add(1, Ordering::Relaxed) != 49
-    });
-
-    let mut engine = Engine::new(
-        formualizer_eval::test_workbook::TestWorkbook::new(),
-        EvalConfig::default().with_formula_plane_mode(FormulaPlaneMode::Shadow),
-    );
-    adapter.stream_into_engine(&mut engine).unwrap();
-
-    let report = engine.last_formula_ingest_report().unwrap();
-    assert_eq!(report.shadow_accepted_span_cells, 0, "{report:?}");
-    assert_eq!(report.source_compressed_families_prepared, 0, "{report:?}");
-    assert_eq!(report.source_compressed_cells_prepared, 0, "{report:?}");
-    assert_eq!(report.source_family_promoted, 0, "{report:?}");
-    assert_eq!(report.graph_formula_cells_materialized, 100, "{report:?}");
-    assert_eq!(report.source_spool_replays, 1, "{report:?}");
-    assert_eq!(engine.baseline_stats().formula_plane_active_span_count, 0);
-    assert_eq!(engine.baseline_stats().graph_formula_vertex_count, 100);
-
-    engine.evaluate_all().unwrap();
-    for row in 1..=100 {
-        assert_eq!(
-            engine.get_cell_value("Sheet1", row, 2),
-            Some(LiteralValue::Number(row as f64 + 1.0)),
-            "fallback row {row}"
-        );
-        let fallback_ast = engine.get_cell("Sheet1", row, 2).unwrap().0.unwrap();
-        assert_eq!(
-            fallback_ast.fingerprint(),
-            formualizer_parse::parser::parse(format!("=ABS(A{row})+1"))
-                .unwrap()
-                .fingerprint(),
-            "fallback formula order at row {row}"
         );
     }
 }
@@ -1679,61 +1613,6 @@ fn formula_only_record_expands_arrow_dimensions_from_file() {
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), understated_formula_dimensions_xlsx()).unwrap();
     assert_understated_formula_dimensions(CalamineAdapter::open_path(file.path()).unwrap());
-}
-
-#[test]
-fn calamine_classifies_array_and_data_table_tags_as_normal() {
-    use calamine::{Xlsx, XlsxFormulaMetadata, open_workbook_from_rs};
-
-    let mut workbook: Xlsx<_> =
-        open_workbook_from_rs(Cursor::new(formula_roles_xlsx())).expect("open role fixture");
-    let mut reader = workbook
-        .worksheet_cells_reader("Sheet1")
-        .expect("open worksheet stream");
-    let mut formulas = Vec::new();
-    while let Some(record) = reader.next_cell_with_formula_metadata().unwrap() {
-        if let Some(formula) = record.formula {
-            formulas.push(formula);
-        }
-    }
-    assert_eq!(
-        formulas,
-        vec![
-            XlsxFormulaMetadata::Normal {
-                formula: "1+1".to_string(),
-            },
-            XlsxFormulaMetadata::Normal {
-                formula: "2+2".to_string(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn malformed_shared_si_and_ref_are_rejected_by_calamine_before_source_seam() {
-    use calamine::{Xlsx, open_workbook_from_rs};
-
-    for (attribute, expected) in [
-        (
-            "si=\"not-a-number\" ref=\"A1:A1\"",
-            "si attribute must be a number",
-        ),
-        ("si=\"1\" ref=\"not-a-range\"", "Expecting alphanumeric"),
-    ] {
-        let mut workbook: Xlsx<_> =
-            open_workbook_from_rs(Cursor::new(malformed_shared_attribute_xlsx(attribute)))
-                .expect("workbook container remains valid");
-        let mut reader = workbook
-            .worksheet_cells_reader("Sheet1")
-            .expect("open worksheet stream");
-        let error = reader
-            .next_cell_with_formula_metadata()
-            .expect_err("Calamine must reject malformed shared metadata");
-        assert!(
-            error.to_string().contains(expected),
-            "unexpected error for {attribute}: {error}"
-        );
-    }
 }
 
 #[test]

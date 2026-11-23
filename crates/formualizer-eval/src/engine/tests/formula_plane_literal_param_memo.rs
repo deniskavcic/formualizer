@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use chrono::{Duration, NaiveDate, NaiveTime};
-use formualizer_common::{ErrorContext, ExcelError, ExcelErrorExtra, ExcelErrorKind, LiteralValue};
+use formualizer_common::{ExcelError, ExcelErrorExtra, ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::{ASTNode, ASTNodeType, parse};
 
-use crate::engine::template::canonical::{CanonicalRejectKind, SlotContext, canonicalize_template};
-use crate::engine::template::slots::value_ref_slot_descriptors;
+use crate::engine::template::canonical::{CanonicalRejectKind, canonicalize_template};
 use crate::engine::{
     Engine, EvalConfig, FormulaIngestBatch, FormulaIngestRecord, FormulaPlaneMode,
 };
@@ -278,21 +277,14 @@ fn formula_plane_parameter_key_dates_and_durations_are_typed() {
 
 #[test]
 fn formula_plane_parameter_key_error_includes_message_and_context() {
-    let err_a = ExcelError {
-        kind: ExcelErrorKind::Value,
-        message: Some("a".into()),
-        context: Some(ErrorContext {
-            row: Some(1),
-            col: Some(2),
-            origin_row: Some(3),
-            origin_col: Some(4),
-            origin_sheet: Some("S".into()),
-        }),
-        extra: ExcelErrorExtra::Spill {
+    let err_a = ExcelError::new(ExcelErrorKind::Value)
+        .with_message("a")
+        .with_location(1, 2)
+        .with_origin(Some("S".into()), 3, 4)
+        .with_extra(ExcelErrorExtra::Spill {
             expected_rows: 2,
             expected_cols: 3,
-        },
-    };
+        });
 }
 
 #[test]
@@ -307,41 +299,4 @@ fn formula_plane_dynamic_template_not_memoized() {
     let ast = parse("=OFFSET(A1,0,0)").unwrap();
     let template = canonicalize_template(&ast, 1, 1);
     assert!(!template.labels.is_authority_supported());
-}
-
-#[test]
-fn formula_plane_row_column_args_not_value_parameterized() {
-    for formula in ["=ROW(A1)", "=COLUMN(A1)"] {
-        let ast = parse(formula).unwrap();
-        let template = canonicalize_template(&ast, 1, 2);
-        assert!(value_ref_slot_descriptors(&template.expr).is_empty());
-    }
-}
-
-#[test]
-fn formula_plane_offset_byref_not_value_parameterized() {
-    let ast = parse("=OFFSET(A1,0,0)").unwrap();
-    let template = canonicalize_template(&ast, 1, 2);
-    assert!(value_ref_slot_descriptors(&template.expr).is_empty());
-}
-
-#[test]
-fn formula_plane_index_position_arg_is_value_parameterized() {
-    let ast = parse("=INDEX($D$1:$D$10,A1)").unwrap();
-    let template = canonicalize_template(&ast, 1, 2);
-    let slots = value_ref_slot_descriptors(&template.expr);
-    assert_eq!(slots.len(), 1);
-    assert_eq!(slots[0].context, SlotContext::Value);
-}
-
-#[test]
-fn formula_plane_criteria_range_not_value_parameterized() {
-    let ast = parse("=SUMIFS(B:B,A:A,\"Type1\")").unwrap();
-    let template = canonicalize_template(&ast, 1, 3);
-    let slots = value_ref_slot_descriptors(&template.expr);
-    assert!(
-        slots
-            .iter()
-            .all(|slot| slot.context != SlotContext::CriteriaRangeArg)
-    );
 }
