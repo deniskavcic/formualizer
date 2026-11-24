@@ -19,7 +19,17 @@ pub(crate) fn add_number_columns(
     total: &mut f64,
     columns: &[std::sync::Arc<arrow_array::Float64Array>],
 ) {
-    if let [column] = columns {
+    // INFObySolved: grid-v3 selection stats (server/rust/src/sheet/actor/stats.rs,
+    // measured by server/rust/benches/stats.rs) need empty columns skipped:
+    // range_stats 100k x 5000 was 9-11x slower on 0.13 because 4,988 of the
+    // 5,000 columns are empty. An all-null column adds only +0, a no-op, so
+    // the row-then-column order over the remaining columns is unchanged.
+    let populated: smallvec::SmallVec<[&arrow_array::Float64Array; 16]> = columns
+        .iter()
+        .map(|column| column.as_ref())
+        .filter(|column| column.null_count() < column.len())
+        .collect();
+    if let [column] = populated.as_slice() {
         if column.null_count() == 0 {
             for &value in column.values() {
                 *total += value;
@@ -29,9 +39,9 @@ pub(crate) fn add_number_columns(
                 *total += value.unwrap_or(0.0);
             }
         }
-    } else if let Some(first) = columns.first() {
+    } else if let Some(first) = populated.first() {
         for row in 0..first.len() {
-            for column in columns {
+            for column in &populated {
                 *total += if column.is_valid(row) {
                     column.value(row)
                 } else {
@@ -2229,6 +2239,74 @@ mod tests_subtotal_aggregate {
             ],
         );
         assert_error_kind(out, ExcelErrorKind::NImpl);
+    }
+}
+
+#[cfg(test)]
+mod tests_add_number_columns {
+    // INFObySolved: covers the empty-column skip in add_number_columns.
+    use super::add_number_columns;
+    use arrow_array::Float64Array;
+    use std::sync::Arc;
+
+    fn null_column(len: usize) -> Arc<Float64Array> {
+        Arc::new(Float64Array::from(vec![None; len]))
+    }
+
+    #[test]
+    fn mixed_columns_keep_row_major_order() {
+        let a = [1e16, -1e16, 1.0];
+        let b = [Some(1.0), None, Some(1e16)];
+        let columns = vec![
+            null_column(3),
+            Arc::new(Float64Array::from(a.to_vec())),
+            null_column(3),
+            Arc::new(Float64Array::from(b.to_vec())),
+        ];
+        let mut total = 0.0;
+        add_number_columns(&mut total, &columns);
+
+        let mut expected = 0.0f64;
+        for row in 0..3 {
+            expected += a[row];
+            expected += b[row].unwrap_or(0.0);
+        }
+        let mut column_major = 0.0f64;
+        for value in a {
+            column_major += value;
+        }
+        for value in b {
+            column_major += value.unwrap_or(0.0);
+        }
+        assert_ne!(expected.to_bits(), column_major.to_bits());
+        assert_eq!(total.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn one_populated_column_sums_sequentially() {
+        let values = [Some(1e16), Some(1.0), None, Some(-1e16), Some(1.0)];
+        let columns = vec![
+            null_column(5),
+            null_column(5),
+            Arc::new(Float64Array::from(values.to_vec())),
+            null_column(5),
+        ];
+        let mut total = 0.0;
+        add_number_columns(&mut total, &columns);
+
+        let mut expected = 0.0f64;
+        for value in values {
+            expected += value.unwrap_or(0.0);
+        }
+        assert_eq!(total.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn all_null_columns_leave_positive_zero() {
+        let columns = vec![null_column(4), null_column(4), null_column(4)];
+        let mut total = 0.0;
+        add_number_columns(&mut total, &columns);
+        assert_eq!(total.to_bits(), 0.0f64.to_bits());
     }
 }
 

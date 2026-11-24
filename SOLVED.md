@@ -112,3 +112,26 @@ take upstream's sparse arm and stay unmaterialized too. Upstream's
 
 Upstream check, 2026-11-03: v0.13.0 `dfd2f964` has no fix; `insert_columns` is
 unchanged since `7ec3b5f1`.
+
+## Empty columns skipped in numeric sums
+
+`add_number_columns` (`crates/formualizer-eval/src/builtins/math/aggregate.rs`),
+which SUM, AVERAGE and the SUMIFS family call once per row chunk, now drops
+all-null columns before adding. Grid-v3 selection stats
+(`server/rust/src/sheet/actor/stats.rs`, measured by
+`server/rust/benches/stats.rs`) need this: `range_stats` over 100k x 5000 was
+9-11x slower on 0.13, because 4,988 of the 5,000 columns are empty and the
+row-major loop still checked every one of them on every row. With the patch,
+measured same-load against 0.10.1 (2026-11-23), it is 437-576 ms vs 378-418 ms
+(1.2-1.4x), down from 9-11x.
+
+An all-null column adds only +0. The accumulator starts at +0 and cannot become
+-0, so dropping it changes nothing. Adding +0 changes a total only when it is
+-0, and under round-to-nearest a sum that starts at +0 never reaches -0. All
+three callers (SUM, AVERAGE, `criteria_aggregates.rs`) start at `0.0`. The remaining columns keep upstream's
+row-then-column order (`NumericProfile::ExcelCompatible`), and a single
+remaining column takes upstream's sequential single-column loop. The kept
+columns go into a 16-slot `SmallVec`, so there is no heap allocation unless more
+than 16 columns hold data. Covered by `tests_add_number_columns` in the same
+file: the results match a hand-written row-major sum bit for bit, and all-null
+input leaves +0.0.
