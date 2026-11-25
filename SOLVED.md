@@ -116,8 +116,8 @@ take upstream's sparse arm and stay unmaterialized too. Upstream's
 `column_insert_delete_retains_chunk_alignment` and
 `multiple_adjacent_column_ops_alignment` still pass.
 
-Upstream check, 2026-11-03: v0.13.0 `dfd2f964` has no fix; `insert_columns` is
-unchanged since `7ec3b5f1`.
+Upstream check, 2026-11-25: v0.15.0 `0a18b167` has no fix; `insert_columns` is
+unchanged since `7ec3b5f1` (v0.13.0 `dfd2f964` was checked on 2026-11-03).
 
 ## Empty columns skipped in numeric sums
 
@@ -130,6 +130,12 @@ all-null columns before adding. Grid-v3 selection stats
 row-major loop still checked every one of them on every row. With the patch,
 measured same-load against 0.10.1 (2026-11-23), it is 437-576 ms vs 378-418 ms
 (1.2-1.4x), down from 9-11x.
+
+On v0.15.0 (2026-11-25, grid-v3 0.15 upgrade plan, B1) the same bench with the
+patch in place runs in 1.37 ms, against 399 ms for 0.13 with the patch
+(interleaved, same load). The patch was not re-measured reverted on 0.15, so
+whether upstream's faster path alone covers the empty columns is unknown;
+measure that before the next sync and drop this divergence if it does.
 
 An all-null column adds only +0. The accumulator starts at +0 and cannot become
 -0, so dropping it changes nothing. Adding +0 changes a total only when it is
