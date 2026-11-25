@@ -1,5 +1,6 @@
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::function::{FnCaps, Function, FunctionResolution};
+use crate::function_contract::{FunctionContextDependence, FunctionSemanticContract};
 use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::{ArgKind, ExcelError, ExcelErrorKind, LiteralValue, PackedSheetCell};
 use formualizer_parse::parser::ReferenceType;
@@ -677,7 +678,6 @@ pub struct OffsetFn;
 /// ```yaml,sandbox
 /// title: "Move one row down and one column right"
 /// grid:
-///   A1: 10
 ///   B2: 42
 /// formula: '=OFFSET(A1,1,1)'
 /// expected: 42
@@ -686,10 +686,8 @@ pub struct OffsetFn;
 /// ```yaml,sandbox
 /// title: "Offset and resize a range"
 /// grid:
-///   A1: 1
 ///   A2: 2
 ///   A3: 3
-///   B1: 4
 ///   B2: 5
 ///   B3: 6
 /// formula: '=SUM(OFFSET(A1,1,0,2,2))'
@@ -878,6 +876,98 @@ fn arg_indirect() -> Vec<ArgSchema> {
 #[derive(Debug)]
 pub struct IndirectFn;
 
+enum IndirectR1C1 {
+    CellReference,
+    UnverifiedOrigin,
+    AxisReference,
+    NotCoordinate,
+}
+
+impl IndirectFn {
+    /// Validate the cell/range portion of an R1C1 request before selecting the
+    /// unavailable dialect. Coordinates are checked against the formula origin;
+    /// syntax alone must not turn malformed or out-of-bounds input into a root.
+    fn r1c1_cells(text: &str, origin: Option<crate::CellRef>) -> IndirectR1C1 {
+        // The Boolean indicates a syntactically valid relative axis whose
+        // bounds cannot be decided without an origin in this dispatch context.
+        fn axis(input: &mut &str, marker: char, origin: Option<u32>, limit: i64) -> Option<bool> {
+            if !input.starts_with(marker) {
+                return None;
+            }
+            *input = &input[1..];
+            let coordinate = if input.starts_with('[') {
+                let end = input.find(']')?;
+                let offset = input[1..end].parse::<i64>().ok()?;
+                if offset <= -limit || offset >= limit {
+                    return None;
+                }
+                *input = &input[end + 1..];
+                match origin {
+                    Some(origin) => (i64::from(origin) + 1).checked_add(offset)?,
+                    None => return Some(true),
+                }
+            } else {
+                let digits = input.bytes().take_while(u8::is_ascii_digit).count();
+                if digits == 0 {
+                    match origin {
+                        Some(origin) => i64::from(origin) + 1,
+                        None => return Some(true),
+                    }
+                } else {
+                    let absolute = input[..digits].parse::<i64>().ok()?;
+                    *input = &input[digits..];
+                    absolute
+                }
+            };
+            (1..=limit).contains(&coordinate).then_some(false)
+        }
+        let upper = text.to_ascii_uppercase();
+        let mut parts = upper.split(':');
+        let first = parts.next().unwrap();
+        let second = parts.next();
+        if parts.next().is_some() {
+            return IndirectR1C1::NotCoordinate;
+        }
+        let cell = |part: &str| {
+            let mut rest = part;
+            let row_unknown = axis(&mut rest, 'R', origin.map(|c| c.coord.row()), 1_048_576)?;
+            let col_unknown = axis(&mut rest, 'C', origin.map(|c| c.coord.col()), 16_384)?;
+            rest.is_empty().then_some(row_unknown || col_unknown)
+        };
+        if let Some(first_unknown) = cell(first)
+            && let Some(second_unknown) = second.map(cell).unwrap_or(Some(false))
+        {
+            return if first_unknown || second_unknown {
+                IndirectR1C1::UnverifiedOrigin
+            } else {
+                IndirectR1C1::CellReference
+            };
+        }
+        // Whole-row/column R1C1 ranges are distinct grammar. Their support
+        // contract is not established by the cell-range fixtures.
+        if let Some(second) = second {
+            for (marker, limit) in [('R', 1_048_576), ('C', 16_384)] {
+                let parse_axis = |part: &str| {
+                    let mut rest = part;
+                    let coordinate = origin.map(|c| {
+                        if marker == 'R' {
+                            c.coord.row()
+                        } else {
+                            c.coord.col()
+                        }
+                    });
+                    axis(&mut rest, marker, coordinate, limit)?;
+                    rest.is_empty().then_some(())
+                };
+                if parse_axis(first).is_some() && parse_axis(second).is_some() {
+                    return IndirectR1C1::AxisReference;
+                }
+            }
+        }
+        IndirectR1C1::NotCoordinate
+    }
+}
+
 /// Converts text into a reference and returns the referenced value or range.
 ///
 /// `INDIRECT` lets formulas build references dynamically from strings such as `"A1"` or
@@ -885,9 +975,11 @@ pub struct IndirectFn;
 ///
 /// # Remarks
 /// - `a1_style` defaults to `TRUE` (A1 style parsing).
-/// - `a1_style=FALSE` (R1C1 parsing) is currently not implemented and returns `#N/IMPL!`.
 /// - Invalid or unresolved references return `#REF!`.
 /// - The function is volatile because target references can change without direct dependency links.
+///
+/// # Differences from Excel
+/// R1C1 cell and range references selected with `a1_style=FALSE` return `#N/IMPL!` in Formualizer.
 ///
 /// # Examples
 /// ```yaml,sandbox
@@ -915,7 +1007,7 @@ pub struct IndirectFn;
 ///   - OFFSET
 /// faq:
 ///   - q: "What happens if a1_style is FALSE?"
-///     a: "R1C1 parsing is not implemented here yet, so INDIRECT(...,FALSE) returns #N/IMPL!."
+///     a: "R1C1 cell and range references are unsupported. Defined names and table references can still resolve with either flag."
 ///   - q: "How are bad reference strings reported?"
 ///     a: "If the text cannot be parsed or resolved to a valid reference, INDIRECT returns #REF!."
 /// ```
@@ -950,7 +1042,8 @@ impl Function for IndirectFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Option<Result<ReferenceType, ExcelError>> {
-        if args.is_empty() {
+        // Reference callers can bypass dispatch's schema validation.
+        if !(1..=2).contains(&args.len()) {
             return Some(Err(ExcelError::new(ExcelErrorKind::Value)));
         }
 
@@ -981,12 +1074,74 @@ impl Function for IndirectFn {
             // neither A1 nor R1C1 syntax). Excel resolves `INDIRECT(name, FALSE)`
             // exactly like `INDIRECT(name)`, so handle those before refusing R1C1.
             // Real R1C1 cell/range text remains unsupported.
-            return match formualizer_parse::parser::ReferenceType::from_string(&ref_text) {
-                Ok(ReferenceType::NamedRange(name)) => Some(Ok(ReferenceType::NamedRange(name))),
-                Ok(ReferenceType::Table(tref)) => Some(Ok(ReferenceType::Table(tref))),
-                _ => Some(Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                    "INDIRECT with R1C1 style (second argument FALSE) is not yet supported",
-                ))),
+            let parsed = ReferenceType::from_string(&ref_text);
+            if let Ok(reference @ (ReferenceType::NamedRange(_) | ReferenceType::Table(_))) =
+                &parsed
+                && _ctx
+                    .resolve_range_view(reference, _ctx.current_sheet())
+                    .is_ok()
+            {
+                return Some(Ok(reference.clone()));
+            }
+            // Reuse the existing sheet grammar for the qualifier; validate the
+            // coordinate portion separately instead of treating NamedRange as
+            // proof that the text is not R1C1.
+            let coordinate_text = if let Some((qualifier, coordinates)) = ref_text.rsplit_once('!')
+            {
+                let qualified = format!("{qualifier}!A1");
+                match ReferenceType::from_string(&qualified) {
+                    Ok(ReferenceType::Cell {
+                        sheet: Some(sheet), ..
+                    }) if _ctx.sheet_index_by_name(&sheet).is_some() => coordinates,
+                    _ => return Some(Err(ExcelError::new(ExcelErrorKind::Ref))),
+                }
+            } else {
+                ref_text.as_str()
+            };
+            match Self::r1c1_cells(coordinate_text, _ctx.current_cell()) {
+                IndirectR1C1::CellReference => {
+                    _ctx.report_unavailable_operation(
+                        crate::operation_diagnostics::UnavailableOperation::UnimplementedFunction {
+                            name: self.name().into(),
+                        },
+                    );
+                    // Preserve the legacy value: single-cell spellings used
+                    // to resolve as missing names (#REF!), while range spellings
+                    // reached the explicit #N/IMPL! refusal.
+                    match parsed {
+                        Ok(
+                            reference @ (ReferenceType::NamedRange(_) | ReferenceType::Table(_)),
+                        ) => Some(Ok(reference)),
+                        _ => Some(Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
+                            "INDIRECT with R1C1 style (second argument FALSE) is not yet supported",
+                        ))),
+                    }
+                }
+                selection @ (IndirectR1C1::UnverifiedOrigin | IndirectR1C1::AxisReference) => {
+                    let mode = match selection {
+                        IndirectR1C1::AxisReference => "r1c1_axis_reference",
+                        _ => "r1c1_relative_origin",
+                    };
+                    _ctx.report_unavailable_operation(
+                        crate::operation_diagnostics::UnavailableOperation::UnverifiedFunctionMode {
+                            name: self.name().into(), mode,
+                        },
+                    );
+                    // Preserve the old name/ref failure for these unresolved
+                    // selections; evidence does not manufacture an implementation.
+                    match parsed {
+                        Ok(
+                            reference @ (ReferenceType::NamedRange(_) | ReferenceType::Table(_)),
+                        ) => Some(Ok(reference)),
+                        _ => Some(Err(ExcelError::new(ExcelErrorKind::NImpl))),
+                    }
+                }
+                IndirectR1C1::NotCoordinate => match parsed {
+                    Ok(reference @ (ReferenceType::NamedRange(_) | ReferenceType::Table(_))) => {
+                        Some(Ok(reference))
+                    }
+                    _ => Some(Err(ExcelError::new(ExcelErrorKind::Ref))),
+                },
             };
         }
 
@@ -1188,6 +1343,111 @@ impl Function for AnchorArrayFn {
 }
 
 #[derive(Debug)]
+pub struct SingleFn;
+
+/// Returns a single value from its argument by implicit intersection.
+///
+/// `SINGLE(x)` is the stored form of the implicit-intersection operator `@x`
+/// (files written by Excel store `_xlfn.SINGLE(x)`). Both evaluate the same
+/// way: a reference, written or returned by a function such as `INDEX` or
+/// `OFFSET`, selects the cell on the formula's row (for a column) or column
+/// (for a row), and a computed array gives its top-left value.
+///
+/// # Remarks
+/// - A multi-row, multi-column reference selects the cell at the formula's
+///   row and column.
+/// - `#VALUE!` when the formula cell is outside the reference's rows or
+///   columns.
+/// - The result never spills: an array constant or an array-returning
+///   function such as `SEQUENCE` gives only its top-left value.
+///
+/// # Formula example
+/// ```excel
+/// # returns: 1
+/// =SINGLE({1,2;3,4})
+/// ```
+///
+/// ```yaml,docs
+/// related:
+///   - ANCHORARRAY
+///   - INDEX
+/// faq:
+///   - q: "How does SINGLE relate to @?"
+///     a: "They are the same operation: @A1:A10 is written as _xlfn.SINGLE(A1:A10) in stored files, and both return one value by implicit intersection."
+/// ```
+///
+/// [formualizer-docgen:schema:start]
+/// Name: SINGLE
+/// Type: SingleFn
+/// Min args: 1
+/// Max args: 1
+/// Variadic: false
+/// Signature: SINGLE(arg1: any@range)
+/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for SingleFn {
+    fn caps(&self) -> FnCaps {
+        FnCaps::PURE
+    }
+    fn name(&self) -> &'static str {
+        "SINGLE"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn semantic_contract(&self, _arity: usize) -> Option<FunctionSemanticContract> {
+        // The result depends on the formula cell, as for `@`.
+        let mut contract = FunctionSemanticContract::trusted_builtin_default(None);
+        contract.context = FunctionContextDependence::PlacementDependent;
+        Some(contract)
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Any],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Range,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            }]
+        });
+        &SCHEMA
+    }
+
+    // Skip eager argument validation: it would resolve a reference-returning
+    // operand through `eval_reference` before `eval` evaluates it again as a
+    // value.
+    fn dispatch<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        self.eval(args, ctx)
+    }
+
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        if args.len() != 1 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Value)
+                    .with_message("SINGLE takes exactly one argument"),
+            )));
+        }
+        Ok(crate::traits::CalcValue::Scalar(
+            args[0].implicit_intersection()?,
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub struct HyperlinkFn;
 
 /// Returns the friendly name of a hyperlink, or its link location when no name is given.
@@ -1195,9 +1455,9 @@ pub struct HyperlinkFn;
 /// The returned value is `friendly_name` when the second argument is present,
 /// otherwise `link_location`.
 ///
-/// Known divergence: the friendly name is always returned as text, whereas
-/// Excel passes numbers and booleans through with their original type, so
-/// `=ISNUMBER(HYPERLINK("x",1))` is FALSE here and TRUE in Excel.
+/// # Differences from Excel
+/// Formualizer returns the friendly name as text. Excel passes numbers and booleans through
+/// with their original type, so `=ISNUMBER(HYPERLINK("x",1))` is FALSE in Formualizer and TRUE in Excel.
 ///
 /// ```yaml,sandbox
 /// title: "Hyperlink with a friendly name"
@@ -1305,6 +1565,7 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(std::sync::Arc::new(IndirectFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(HyperlinkFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(AnchorArrayFn));
+    crate::function_registry::register_builtin(std::sync::Arc::new(SingleFn));
 }
 
 #[cfg(test)]

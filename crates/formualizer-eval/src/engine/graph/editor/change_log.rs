@@ -16,9 +16,10 @@ use formualizer_parse::parser::ASTNode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpillSnapshot {
-    /// Declared target cells (row-major rectangle) owned by this spill anchor.
+    /// Owned cells in row-major order, starting at the anchor. User-edited cells may be omitted.
     pub target_cells: Vec<CellRef>,
-    /// Row-major rectangular values corresponding to the target rectangle.
+    /// Dense values for the original rectangle, relative to the first target cell.
+    /// Values at omitted cells do not confer ownership and are never replayed.
     pub values: Vec<Vec<LiteralValue>>,
 }
 
@@ -48,6 +49,13 @@ pub enum ChangeEvent {
         old_value: Option<LiteralValue>,
         old_formula: Option<ASTNode>,
         new: ASTNode,
+    },
+    TableResized {
+        name: String,
+        old_range: crate::reference::RangeRef,
+        new_range: crate::reference::RangeRef,
+        old_empty_body: bool,
+        new_empty_body: bool,
     },
     SetRowVisibility {
         sheet_id: SheetId,
@@ -218,16 +226,24 @@ impl FormulaRunAdjusted {
     }
 }
 
-/// A run record held by a log: it stands for `run.len` events placed
+/// A run record held by a log: it stands for `run.len - offset` events placed
 /// before retained event `pos`, with consecutive sequence numbers from
 /// `seq0`, one group and one meta.
 #[derive(Debug)]
 struct LazyEntry {
     pos: usize,
+    offset: u32,
     seq0: u64,
     group: Option<u64>,
     meta: ChangeEventMeta,
     run: std::sync::Arc<FormulaRunAdjusted>,
+}
+
+impl LazyEntry {
+    #[inline]
+    fn len(&self) -> usize {
+        self.run.len.saturating_sub(self.offset) as usize
+    }
 }
 
 /// The retained events of a log. `events`/`metas`/`seqs`/`groups` are the
@@ -237,6 +253,7 @@ struct LazyEntry {
 /// before the first record are expanded history.
 #[derive(Debug, Default)]
 struct Retained {
+    head: usize,
     events: Vec<ChangeEvent>,
     metas: Vec<ChangeEventMeta>,
     seqs: Vec<u64>,
@@ -259,7 +276,7 @@ impl Retained {
         let tail_seqs = self.seqs.split_off(start);
         let tail_groups = self.groups.split_off(start);
         let tail_len = tail_events.len();
-        let added: usize = self.lazy.iter().map(|e| e.run.len()).sum();
+        let added: usize = self.lazy.iter().map(LazyEntry::len).sum();
         self.events.reserve(tail_len + added);
         self.metas.reserve(tail_len + added);
         self.seqs.reserve(tail_len + added);
@@ -278,10 +295,10 @@ impl Retained {
                 self.groups.push(group);
                 p += 1;
             }
-            for (i, event) in entry.run.events().enumerate() {
-                self.events.push(event);
+            for (k, i) in (entry.offset..entry.run.len).enumerate() {
+                self.events.push(entry.run.event(i));
                 self.metas.push(entry.meta.clone());
-                self.seqs.push(entry.seq0 + i as u64);
+                self.seqs.push(entry.seq0 + k as u64);
                 self.groups.push(entry.group);
             }
         }
@@ -401,37 +418,138 @@ impl RetainedCell {
     }
 
     fn push_run(&mut self, entry: LazyEntry) {
-        self.len += entry.run.len();
+        self.len += entry.len();
         self.inner.get_mut().lazy.push(entry);
         self.pending_records += 1;
         self.expanded = std::sync::OnceLock::new();
     }
 
-    fn drain_front(&mut self, n: usize) {
-        let r = self.settle();
-        r.events.drain(0..n);
-        r.metas.drain(0..n);
-        r.seqs.drain(0..n);
-        r.groups.drain(0..n);
-        self.len = r.events.len();
+    fn drain_front(&mut self, n: usize) -> Option<u64> {
+        if n == 0 || self.len == 0 {
+            return None;
+        }
+        let drop_n = n.min(self.len);
+        let mut remaining_drop = drop_n;
+        let mut max_evicted_gid: Option<u64> = None;
+
+        // Evict leading plain slices and whole/sliced LazyEntry runs directly
+        // without calling `self.settle()`, keeping unexpanded runs lazy.
+        let r = self.inner.get_mut();
+        let mut lazy_drop = 0usize;
+
+        while remaining_drop > 0 {
+            let next_lazy_pos = r.lazy.get(lazy_drop).map_or(r.events.len(), |e| e.pos);
+            debug_assert!(next_lazy_pos >= r.head);
+
+            let plain_avail = next_lazy_pos.saturating_sub(r.head);
+            if plain_avail > 0 {
+                let take = remaining_drop.min(plain_avail);
+                let end = r.head + take;
+                for i in r.head..end {
+                    if let Some(gid) = r.groups[i] {
+                        max_evicted_gid = Some(max_evicted_gid.map_or(gid, |m| m.max(gid)));
+                    }
+                    r.events[i] = ChangeEvent::CompoundEnd { depth: 0 };
+                    r.metas[i] = ChangeEventMeta::default();
+                }
+                r.head = end;
+                remaining_drop -= take;
+                if remaining_drop == 0 {
+                    break;
+                }
+            }
+
+            if let Some(entry) = r.lazy.get_mut(lazy_drop) {
+                let entry_len = entry.len();
+                if let Some(gid) = entry.group {
+                    max_evicted_gid = Some(max_evicted_gid.map_or(gid, |m| m.max(gid)));
+                }
+                if remaining_drop >= entry_len {
+                    remaining_drop -= entry_len;
+                    lazy_drop += 1;
+                } else {
+                    entry.offset += remaining_drop as u32;
+                    entry.seq0 += remaining_drop as u64;
+                    remaining_drop = 0;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if lazy_drop > 0 {
+            r.lazy.drain(0..lazy_drop);
+            self.pending_records = r.lazy.len();
+            if r.lazy.is_empty() && self.expanded.get().is_none() {
+                self.expanded = std::sync::OnceLock::from(());
+            }
+        }
+
+        self.len -= drop_n;
+        let plain_remaining = r.events.len().saturating_sub(r.head);
+        if self.len == 0 {
+            debug_assert!(r.lazy.is_empty());
+            r.events.clear();
+            r.metas.clear();
+            r.seqs.clear();
+            r.groups.clear();
+            r.head = 0;
+        } else if r.head >= (plain_remaining / 2).max(256) {
+            let shift = r.head;
+            r.events.drain(0..shift);
+            r.metas.drain(0..shift);
+            r.seqs.drain(0..shift);
+            r.groups.drain(0..shift);
+            r.head = 0;
+            for entry in &mut r.lazy {
+                entry.pos -= shift;
+            }
+            let cap_threshold = (plain_remaining * 4).max(4096);
+            if r.events.capacity() > cap_threshold {
+                let target_cap = plain_remaining * 2;
+                r.events.shrink_to(target_cap);
+                r.metas.shrink_to(target_cap);
+                r.seqs.shrink_to(target_cap);
+                r.groups.shrink_to(target_cap);
+            }
+        }
+        max_evicted_gid
     }
 
     fn truncate(&mut self, len: usize) {
         let r = self.settle();
-        r.events.truncate(len);
-        r.metas.truncate(len);
-        r.seqs.truncate(len);
-        r.groups.truncate(len);
-        self.len = r.events.len();
+        let target = r.head.saturating_add(len).min(r.events.len());
+        r.events.truncate(target);
+        r.metas.truncate(target);
+        r.seqs.truncate(target);
+        r.groups.truncate(target);
+        let remaining = r.events.len().saturating_sub(r.head);
+        if remaining == 0 {
+            r.events.clear();
+            r.metas.clear();
+            r.seqs.clear();
+            r.groups.clear();
+            r.head = 0;
+        }
+        self.len = remaining;
     }
 
     fn split_off(&mut self, index: usize) -> Vec<ChangeEvent> {
         let r = self.settle();
-        let events = r.events.split_off(index);
-        let _ = r.metas.split_off(index);
-        let _ = r.seqs.split_off(index);
-        let _ = r.groups.split_off(index);
-        self.len = r.events.len();
+        let target = r.head.saturating_add(index).min(r.events.len());
+        let events = r.events.split_off(target);
+        let _ = r.metas.split_off(target);
+        let _ = r.seqs.split_off(target);
+        let _ = r.groups.split_off(target);
+        let remaining = r.events.len().saturating_sub(r.head);
+        if remaining == 0 {
+            r.events.clear();
+            r.metas.clear();
+            r.seqs.clear();
+            r.groups.clear();
+            r.head = 0;
+        }
+        self.len = remaining;
         events
     }
 
@@ -447,7 +565,7 @@ impl RetainedCell {
 }
 
 /// Audit trail for tracking all changes to the dependency graph
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChangeLog {
     enabled: bool,
     /// Optional cap on retained events; when exceeded, oldest events are evicted (FIFO).
@@ -455,9 +573,17 @@ pub struct ChangeLog {
     /// Track compound operations for atomic rollback
     compound_depth: usize,
     next_seq: u64,
+    spill_clear_revision: u64,
+    /// Cells cleared by `SpillCleared` events inside the currently open
+    /// outermost compound, captured before retention-cap eviction can drop them.
+    pending_spill_cleared_cells: rustc_hash::FxHashSet<CellRef>,
     /// Stack of active group ids for nested compounds
     group_stack: Vec<u64>,
     next_group_id: u64,
+    /// Lowest group id whose prefix has not been evicted from the front.
+    min_intact_group_id: u64,
+    /// Monotonic counter incremented on forward log mutations and `clear()`.
+    mutation_epoch: u64,
 
     current_meta: ChangeEventMeta,
 
@@ -466,6 +592,25 @@ pub struct ChangeLog {
     /// unexpanded until the log is read or indexed by a mutation; each
     /// record is expanded in place exactly once (see [`RetainedCell`]).
     retained: RetainedCell,
+}
+
+impl Default for ChangeLog {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_changelog_events: None,
+            compound_depth: 0,
+            next_seq: 0,
+            spill_clear_revision: 0,
+            pending_spill_cleared_cells: rustc_hash::FxHashSet::default(),
+            group_stack: Vec::new(),
+            next_group_id: 1,
+            min_intact_group_id: 1,
+            mutation_epoch: 0,
+            current_meta: ChangeEventMeta::default(),
+            retained: RetainedCell::default(),
+        }
+    }
 }
 
 /// Complete, operation-local mutation capture used by `Engine` correctness paths.
@@ -612,8 +757,12 @@ impl ChangeLog {
             max_changelog_events: None,
             compound_depth: 0,
             next_seq: 0,
+            spill_clear_revision: 0,
+            pending_spill_cleared_cells: rustc_hash::FxHashSet::default(),
             group_stack: Vec::new(),
             next_group_id: 1,
+            min_intact_group_id: 1,
+            mutation_epoch: 0,
             current_meta: ChangeEventMeta::default(),
             retained: RetainedCell::default(),
         }
@@ -623,6 +772,10 @@ impl ChangeLog {
         let mut out = Self::new();
         out.max_changelog_events = Some(max);
         out
+    }
+
+    pub fn max_changelog_events(&self) -> Option<usize> {
+        self.max_changelog_events
     }
 
     pub fn set_max_changelog_events(&mut self, max: Option<usize>) {
@@ -635,6 +788,7 @@ impl ChangeLog {
             return;
         };
         if max == 0 {
+            self.min_intact_group_id = self.next_group_id;
             self.retained.clear();
             return;
         }
@@ -642,7 +796,9 @@ impl ChangeLog {
             return;
         }
         let drop_n = self.len() - max;
-        self.retained.drain_front(drop_n);
+        if let Some(max_evicted_gid) = self.retained.drain_front(drop_n) {
+            self.min_intact_group_id = self.min_intact_group_id.max(max_evicted_gid + 1);
+        }
     }
 
     fn replay_lazy(
@@ -657,8 +813,14 @@ impl ChangeLog {
         let seq0 = self.next_seq;
         self.next_seq += run.len as u64;
         if retain {
+            self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+            if self.max_changelog_events == Some(0) {
+                self.min_intact_group_id = self.next_group_id;
+                return;
+            }
             let entry = LazyEntry {
                 pos: self.retained.plain_len(),
+                offset: 0,
                 seq0,
                 group: self.group_stack.last().copied(),
                 meta: meta.clone(),
@@ -675,6 +837,12 @@ impl ChangeLog {
         let seq = self.next_seq;
         self.next_seq += 1;
         if retain {
+            self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+            self.note_spill_clear(&event);
+            if self.max_changelog_events == Some(0) {
+                self.min_intact_group_id = self.next_group_id;
+                return;
+            }
             let group = self.group_stack.last().copied();
             self.retained.push(event, meta.clone(), seq, group);
         }
@@ -683,6 +851,7 @@ impl ChangeLog {
     fn replay_begin_compound(&mut self, description: String, meta: &ChangeEventMeta, retain: bool) {
         self.compound_depth += 1;
         if self.compound_depth == 1 {
+            self.pending_spill_cleared_cells.clear();
             let gid = self.next_group_id;
             self.next_group_id += 1;
             self.group_stack.push(gid);
@@ -712,6 +881,9 @@ impl ChangeLog {
         );
         self.compound_depth -= 1;
         self.group_stack.pop();
+        if self.compound_depth == 0 {
+            self.pending_spill_cleared_cells.clear();
+        }
     }
 
     fn replay_capture(&mut self, capture: MutationCapture, retain: bool) {
@@ -750,10 +922,49 @@ impl ChangeLog {
         self.replay_capture(capture, false);
     }
 
+    /// Next sequence number that will be assigned to the following recorded event.
+    ///
+    /// Runs in O(1) without expanding pending lazy run records.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// Monotonic revision of published spill-clear events. Retention, undo and
+    /// truncation do not rewind it; consumers can skip unchanged spill history.
+    pub fn spill_clear_revision(&self) -> u64 {
+        self.spill_clear_revision
+    }
+
+    /// Drain spill-projection cells cleared inside the currently open outermost
+    /// compound action, including any `SpillCleared` events subsequently evicted
+    /// by `max_changelog_events`. Runs without expanding pending lazy runs.
+    pub fn drain_open_compound_spill_cleared(&mut self) -> Vec<CellRef> {
+        if self.pending_spill_cleared_cells.is_empty() {
+            return Vec::new();
+        }
+        self.pending_spill_cleared_cells.drain().collect()
+    }
+
+    fn note_spill_clear(&mut self, event: &ChangeEvent) {
+        if let ChangeEvent::SpillCleared { old, .. } = event {
+            self.spill_clear_revision = self.spill_clear_revision.wrapping_add(1);
+            if self.compound_depth > 0 {
+                self.pending_spill_cleared_cells
+                    .extend(old.target_cells.iter().copied());
+            }
+        }
+    }
+
     pub fn record(&mut self, event: ChangeEvent) {
         if self.enabled {
+            self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+            self.note_spill_clear(&event);
             let seq = self.next_seq;
             self.next_seq += 1;
+            if self.max_changelog_events == Some(0) {
+                self.min_intact_group_id = self.next_group_id;
+                return;
+            }
             let current_group = self.group_stack.last().copied();
             self.retained
                 .push(event, self.current_meta.clone(), seq, current_group);
@@ -764,18 +975,40 @@ impl ChangeLog {
     /// Record an event with explicit metadata (used for replay/redo).
     pub fn record_with_meta(&mut self, event: ChangeEvent, meta: ChangeEventMeta) {
         if self.enabled {
+            self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+            self.note_spill_clear(&event);
             let seq = self.next_seq;
             self.next_seq += 1;
+            if self.max_changelog_events == Some(0) {
+                self.min_intact_group_id = self.next_group_id;
+                return;
+            }
             let current_group = self.group_stack.last().copied();
             self.retained.push(event, meta, seq, current_group);
             self.enforce_cap();
         }
     }
 
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
+    }
+
+    pub(crate) fn begin_replay_group(&mut self) -> u64 {
+        let gid = self.next_group_id;
+        self.next_group_id += 1;
+        self.group_stack.push(gid);
+        gid
+    }
+
+    pub(crate) fn end_replay_group(&mut self) {
+        self.group_stack.pop();
+    }
+
     /// Begin a compound operation (multiple changes from single action)
     pub fn begin_compound(&mut self, description: String) {
         self.compound_depth += 1;
         if self.compound_depth == 1 {
+            self.pending_spill_cleared_cells.clear();
             // allocate new group id
             let gid = self.next_group_id;
             self.next_group_id += 1;
@@ -804,6 +1037,9 @@ impl ChangeLog {
             }
             self.compound_depth -= 1;
             self.group_stack.pop();
+            if self.compound_depth == 0 {
+                self.pending_spill_cleared_cells.clear();
+            }
         }
     }
 
@@ -828,11 +1064,13 @@ impl ChangeLog {
     }
 
     pub fn events(&self) -> &[ChangeEvent] {
-        &self.retained.get().events
+        let r = self.retained.get();
+        &r.events[r.head..]
     }
 
     pub fn event_meta(&self, index: usize) -> Option<&ChangeEventMeta> {
-        self.retained.get().metas.get(index)
+        let r = self.retained.get();
+        r.metas.get(r.head.checked_add(index)?)
     }
 
     pub fn set_actor_id(&mut self, actor_id: Option<String>) {
@@ -856,6 +1094,9 @@ impl ChangeLog {
         self.retained.clear();
         self.compound_depth = 0;
         self.group_stack.clear();
+        self.pending_spill_cleared_cells.clear();
+        self.min_intact_group_id = self.next_group_id;
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
     }
 
     pub fn len(&self) -> usize {
@@ -884,23 +1125,29 @@ impl ChangeLog {
     /// Return (sequence_number, group_id) metadata for event index
     pub fn meta(&self, index: usize) -> Option<(u64, Option<u64>)> {
         let r = self.retained.get();
-        r.seqs.get(index).copied().zip(r.groups.get(index).copied())
+        let idx = r.head.checked_add(index)?;
+        r.seqs.get(idx).copied().zip(r.groups.get(idx).copied())
     }
 
     /// Collect indices belonging to the last (innermost) complete group. Fallback: last single event.
     pub fn last_group_indices(&self) -> Vec<usize> {
-        let groups = &self.retained.get().groups;
-        if let Some(&last_gid) = groups.iter().rev().flatten().next() {
-            let idxs: Vec<usize> = groups
-                .iter()
-                .enumerate()
-                .filter_map(|(i, g)| if *g == Some(last_gid) { Some(i) } else { None })
-                .collect();
-            if !idxs.is_empty() {
-                return idxs;
+        let r = self.retained.get();
+        let groups = &r.groups[r.head..];
+        let Some(&last_group) = groups.last() else {
+            return Vec::new();
+        };
+        if let Some(last_gid) = last_group {
+            if last_gid < self.min_intact_group_id {
+                return Vec::new();
             }
+            let start = groups
+                .iter()
+                .rposition(|g| *g != Some(last_gid))
+                .map_or(0, |idx| idx + 1);
+            (start..groups.len()).collect()
+        } else {
+            vec![groups.len() - 1]
         }
-        self.len().checked_sub(1).into_iter().collect()
     }
 }
 

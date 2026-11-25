@@ -13,10 +13,12 @@ pub(super) fn ingest_source<'a>(
         date_system,
         plans,
         formula_count: _,
+        precision_as_displayed: _,
         values,
         native_metadata_error,
         metadata,
         external,
+        calculation_properties: _,
     } = admission;
     let anchors = plans.iter().any(|p| !p.ownership.anchors.is_empty());
     checkpoint(&options.cancel)?;
@@ -25,7 +27,7 @@ pub(super) fn ingest_source<'a>(
     // or ZIP is created and the authoritative package stays intact.
     let has_tables = plans.iter().any(|p| !p.tables.is_empty());
     // Legacy implicit intersection for formulas Excel calculated (listed in
-    // the calc chain); see `legacy_intersection`.
+    // the calc chain) and shared families; see `legacy_intersection`.
     let calc_chain = if legacy_intersection::needs_calc_chain(&plans, options)? {
         let calc_chain_part = package::calc_chain_part(&mut archive, options);
         legacy_intersection::calc_chain(&mut archive, calc_chain_part.as_deref(), &sheets, options)?
@@ -40,17 +42,15 @@ pub(super) fn ingest_source<'a>(
     let mut evaluation_texts = Vec::with_capacity(plans.len());
     for (index, (sheet, plan)) in sheets.iter().zip(&plans).enumerate() {
         let mut transforms = Vec::new();
-        if !calc_chain.is_empty() {
-            let (legacy, _) = legacy_intersection::lowered_texts(
-                index,
-                plan,
-                &calc_chain,
-                &table_names,
-                external.as_ref().map(|e| &e.range_names),
-                options,
-            )?;
-            transforms.extend(legacy);
-        }
+        let (legacy, _) = legacy_intersection::lowered_texts(
+            index,
+            plan,
+            &calc_chain,
+            &table_names,
+            external.as_ref().map(|e| &e.range_names),
+            options,
+        )?;
+        transforms.extend(legacy);
         if has_tables {
             transforms.extend(table_lowering::lowered_texts(
                 &sheet.name,
@@ -81,6 +81,17 @@ pub(super) fn ingest_source<'a>(
     checkpoint(&options.cancel)?;
     let mut config = options.eval_config.clone();
     config.date_system = date_system;
+    // Unverified source state must not spend a workbook's iteration budget
+    // before deciding to defer. Runtime/error mode identifies live cycles in
+    // one request while leaving acyclic workbooks fully calculable.
+    if options.calculation.as_ref().is_some_and(|policy| {
+        policy.iteration_initial_state == crate::SourceIterationInitialState::RequireVerified
+    }) && matches!(
+        config.cycle.policy,
+        formualizer_eval::engine::CyclePolicy::Iterate { .. }
+    ) {
+        config.cycle.policy = formualizer_eval::engine::CyclePolicy::Error;
+    }
     let refuse_parse_failures = config.formula_parse_policy == FormulaParsePolicy::Strict;
     if refuse_parse_failures {
         config.formula_parse_policy = FormulaParsePolicy::CoerceToError;
@@ -114,6 +125,15 @@ pub(super) fn ingest_source<'a>(
         .clone()
         .map_or_else(WBResolver::default, WBResolver::with_external_values);
     let mut engine: Engine<WBResolver> = Engine::new(resolver, config);
+    engine.configure_operation_diagnostics(
+        formualizer_eval::operation_diagnostics::OperationDiagnosticOptions {
+            sample_limit: options.error_location_limit,
+            physical_telemetry: options.physical_telemetry,
+            track_unverified_providers: true,
+            max_roots: Some(options.limits.max_operation_roots),
+            max_operation_text_bytes: Some(options.limits.max_operation_text_bytes),
+        },
+    );
     engine.set_workbook_load_limits(admission::load_limits(options));
     if let Some(values) = &external_values {
         engine.adopt_file_sheets(sheets.iter().map(|s| s.name.as_str()))?;

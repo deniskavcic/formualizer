@@ -487,6 +487,7 @@ where
         sheet_name: &str,
         families: &[crate::engine::SourceFormulaFamily],
     ) -> Result<crate::engine::FormulaCompressedPreparation, ExcelError> {
+        self.engine.ensure_not_poisoned()?;
         self.engine.observe_function_semantic_epoch()?;
         Ok(self
             .engine
@@ -501,6 +502,7 @@ where
         formula_record_count: u64,
         replay: Box<dyn crate::engine::DeferredFormulaReplay>,
     ) -> Result<crate::engine::FormulaCompressedPreparation, ExcelError> {
+        self.engine.ensure_not_poisoned()?;
         self.engine.observe_function_semantic_epoch()?;
         let replay = Arc::new(std::sync::Mutex::new(replay));
         self.engine.prepare_source_formula_proposals(
@@ -516,7 +518,11 @@ where
         )
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn stage_deferred(&mut self, package: crate::engine::DeferredFormulaPackage) {
+        self.engine.assert_not_poisoned();
         self.engine.stage_deferred_formula_package(package);
     }
 
@@ -527,6 +533,7 @@ where
             crate::engine::FormulaCompressedSourceBatch,
         )>,
     ) -> Result<FormulaIngestReport, ExcelError> {
+        self.engine.ensure_not_poisoned()?;
         self.engine
             .ingest_compressed_formula_source_batches(batches)
     }
@@ -539,6 +546,7 @@ where
             crate::engine::FormulaCompressedPreparation,
         )>,
     ) -> Result<FormulaIngestReport, ExcelError> {
+        self.engine.ensure_not_poisoned()?;
         self.engine.finish_compressed_formula_sources(batches)
     }
 }
@@ -629,12 +637,29 @@ impl ComputedWrite {
     }
 }
 
+#[derive(Debug)]
+struct BufferedReadClaim {
+    seq: u64,
+    result: Arc<crate::engine::effects::RecordedResult>,
+    winning: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OverlayWriteDisposition {
+    Installed,
+    Buffered,
+    Skipped,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ComputedWriteBuffer {
     writes: Vec<ComputedWrite>,
     next_seq: u64,
     estimated_bytes: usize,
     formats_present: bool,
+    // Only dynamic results allocate entries. Existing coalescer sequences
+    // identify the final installed write, including Cell/Rect/Run overwrites.
+    read_claims: FxHashMap<(SheetId, u32, u32), BufferedReadClaim>,
 }
 
 impl ComputedWriteBuffer {
@@ -755,6 +780,7 @@ impl ComputedWriteBuffer {
 
     pub(crate) fn clear(&mut self) {
         self.writes.clear();
+        self.read_claims.clear();
         self.estimated_bytes = 0;
         self.formats_present = false;
     }
@@ -993,11 +1019,20 @@ struct TraceEvaluationCounters {
     cycles: usize,
 }
 
+use crate::traits::{NamedRangeResolver as _, SourceResolver as _};
+
 pub struct Engine<R> {
+    poisoned: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) panic_internal_once: bool,
+    #[cfg(test)]
+    pub(crate) panic_kernel_after_member: std::sync::atomic::AtomicUsize,
     criteria_mask_cache: criteria_mask_cache::CriteriaMaskCache,
     pub(crate) graph: DependencyGraph,
-    resolver: R,
+    resolver: crate::guarded_resolver::GuardedResolver<R>,
     pub(super) resolved_functions: crate::interpreter::ResolvedFunctions,
+    pub(super) operation_diagnostic_collector:
+        Option<Arc<crate::operation_diagnostics::OperationDiagnosticCollector>>,
     resolved_sheet_names:
         FxHashMap<crate::engine::arena::StringId, (crate::SheetId, Option<usize>)>,
     resolution_sheet_revision: Option<(u64, u64, usize)>,
@@ -1013,8 +1048,18 @@ pub struct Engine<R> {
     /// one recalc — including SCC iteration passes — agree (spec §7.11).
     clock: crate::timezone::SnapshotClock,
     thread_pool: Option<Arc<rayon::ThreadPool>>,
+    /// The host's workbook path, for `CELL("filename")`.
+    workbook_path: Option<String>,
     pub recalc_epoch: u64,
+    resumable: Option<super::resumable::LogicalRecalculation>,
+    resumable_call: bool,
+    recalc_options: Option<super::RecalcJobOptions>,
+    #[cfg(test)]
+    pub(crate) resumable_stop_after_units_for_test: Option<usize>,
     snapshot_id: std::sync::atomic::AtomicU64,
+    // Admission-only signal: source publication must not change ordinary
+    // snapshots or invalidate unrelated lookup/planning/bounds caches.
+    source_mutation_generation: u64,
     topology_epoch: u64,
     cached_static_schedule: Option<CachedScheduleEntry>,
     /// Program 3 (plan reuse): schedules of recent earlier requests, most
@@ -1048,6 +1093,8 @@ pub struct Engine<R> {
     chained_members_for_test: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     lane_clean_reads_for_test: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    aggregate_kernel_members_for_test: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     criteria_kernel_members_for_test: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -1162,6 +1209,8 @@ pub struct Engine<R> {
     /// Opt-in snapshot request: defer only next-cycle volatile redirty.
     snapshot_evaluation_active: bool,
     snapshot_volatile_redirty_pending: bool,
+    /// Completed snapshot SCCs stay Current until the next request chooses work.
+    snapshot_iterative_redirty_pending: Vec<VertexId>,
     /// Members of iterating SCCs retained across recalcs (#368), keyed to the
     /// id of the retained SCC they belong to (ids come from
     /// `next_retained_scc_id`; grouping is only used for telemetry).
@@ -1272,12 +1321,78 @@ where
     arrow_undo: Option<*mut crate::engine::ArrowUndoBatch>,
     // True when this EngineAction must enforce conservative atomic transaction policy.
     atomic_policy: bool,
+    // Incremental action-local ownership history, kept in the current frame.
+    // The flag retains mask eligibility for untouched projections and explicit
+    // clears. Literal/formula writes revoke it; no-spill edits add nothing.
+    // Keep released entries to distinguish later user writes from projections.
+    spill_projection_history:
+        std::collections::HashMap<CellRef, bool, formualizer_common::CoordBuildHasher>,
 }
 
 impl<'a, R> EngineAction<'a, R>
 where
     R: EvaluationContext,
 {
+    fn remember_spill_clears(&mut self, events: &[ChangeEvent]) {
+        for event in events {
+            if let ChangeEvent::SpillCleared { old, .. } = event {
+                for &cell in &old.target_cells {
+                    self.spill_projection_history.entry(cell).or_insert(true);
+                }
+            }
+        }
+    }
+
+    /// Capture former projections in the old frame before structural invalidation.
+    /// Compaction can erase both computed and delta entries, so mask eligibility
+    /// follows action-local user writes rather than overlay presence.
+    fn spill_history_masks_before_insert(
+        &self,
+        sheet: SheetId,
+        before: u32,
+        rows: bool,
+    ) -> Vec<CellRef> {
+        let name = self.engine.graph.sheet_name(sheet);
+        self.spill_projection_history
+            .iter()
+            .filter_map(|(&cell, &mask)| {
+                let axis = if rows {
+                    cell.coord.row()
+                } else {
+                    cell.coord.col()
+                };
+                (mask
+                    && cell.sheet_id == sheet
+                    && axis >= before
+                    && self
+                        .engine
+                        .read_cell_formula_ast(name, cell.coord.row() + 1, cell.coord.col() + 1)
+                        .is_none())
+                .then_some(cell)
+            })
+            .collect()
+    }
+
+    fn shift_spill_history(&mut self, sheet: SheetId, before: u32, count: u32, rows: bool) {
+        self.spill_projection_history = self
+            .spill_projection_history
+            .drain()
+            .map(|(cell, mask)| {
+                if cell.sheet_id != sheet {
+                    return (cell, mask);
+                }
+                let (mut row, mut col) = (cell.coord.row(), cell.coord.col());
+                if rows && row >= before {
+                    row = row.saturating_add(count);
+                }
+                if !rows && col >= before {
+                    col = col.saturating_add(count);
+                }
+                (CellRef::new(sheet, Coord::new(row, col, true, true)), mask)
+            })
+            .collect();
+    }
+
     #[inline]
     fn addr_for(&mut self, sheet: &str, row: u32, col: u32) -> crate::reference::CellRef {
         let sheet_id = self.engine.graph.sheet_id_mut(sheet);
@@ -1298,6 +1413,7 @@ where
         col: u32,
         value: LiteralValue,
     ) -> Result<(), crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if self.capture.is_some() {
             let old_value = self.engine.read_cell_value(sheet, row, col);
             let mut old_formula = self.engine.read_cell_formula_ast(sheet, row, col);
@@ -1327,7 +1443,18 @@ where
                 old_formula = self.engine.read_cell_formula_ast(sheet, row, col);
             }
 
-            let delta_old_sem = if old_formula.is_some() {
+            let old_was_spill_child = self
+                .engine
+                .graph
+                .spill_registry_anchor_for_cell(addr)
+                .is_some_and(|owner| self.engine.graph.get_cell_ref(owner) != Some(addr));
+            let delta_old_sem = if old_formula.is_some()
+                || old_was_spill_child
+                || self.spill_projection_history.get(&addr) == Some(&true)
+            {
+                // An untouched former projection is restored by the spill snapshot.
+                // Once a user write revokes mask eligibility, old_value is the
+                // current literal instead: keep it so redo can remove/replace it.
                 None
             } else {
                 Some(old_value.clone().unwrap_or(LiteralValue::Empty))
@@ -1351,6 +1478,26 @@ where
                 col: addr.coord.col(),
             });
 
+            self.remember_spill_clears(&unsafe { (&*capture_ptr).events() }[start_len..]);
+            let clears_projection = matches!(value, LiteralValue::Empty)
+                && self.spill_projection_history.contains_key(&addr);
+            if clears_projection {
+                // Empty releases an earlier literal so a later spill can fill
+                // this cell. Keep a computed tombstone to hide compacted base
+                // values until then, rather than a delta that masks new output.
+                self.engine.clear_delta_overlay_cell(sheet, row, col);
+                self.engine.set_computed_overlay_cell_raw(
+                    sheet,
+                    row,
+                    col,
+                    Some(LiteralValue::Empty),
+                );
+            }
+            if let Some(mask) = self.spill_projection_history.get_mut(&addr) {
+                // A clear leaves a projection mask, not a user blocker. Carry
+                // it through later inserts even if the Empty was compacted.
+                *mask = clears_projection;
+            }
             if let Some(undo_ptr) = self.arrow_undo {
                 // 1) Spill snapshot operations (computed overlay rect restore).
                 let new_events = &unsafe { (&*capture_ptr).events() }[start_len..];
@@ -1363,7 +1510,7 @@ where
                 let sheet_id = self.engine.graph.sheet_id_mut(sheet);
                 let row0 = row.saturating_sub(1);
                 let col0 = col.saturating_sub(1);
-                let delta_new_sem = Some(value.clone());
+                let delta_new_sem = (!clears_projection).then_some(value.clone());
                 undo.record_delta_cell(sheet_id, row0, col0, delta_old_sem, delta_new_sem);
                 undo.record_computed_cell(sheet_id, row0, col0, old_comp, new_comp);
             }
@@ -1383,6 +1530,7 @@ where
         col: u32,
         ast: ASTNode,
     ) -> Result<(), crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if self.capture.is_some() {
             let old_value = self.engine.read_cell_value(sheet, row, col);
             let mut old_formula = self.engine.read_cell_formula_ast(sheet, row, col);
@@ -1415,8 +1563,13 @@ where
             if old_formula.is_none() {
                 old_formula = self.engine.read_cell_formula_ast(sheet, row, col);
             }
+            // History membership survives user writes. Only an eligible mask
+            // still represents an untouched projection; a later literal must
+            // be journaled so the formula's forward replay removes its delta.
+            // Inverse Arrow replay already skips deltas over restored spills.
             let delta_old = if self.arrow_undo.is_some() {
-                if old_formula.is_some() {
+                if old_formula.is_some() || self.spill_projection_history.get(&addr) == Some(&true)
+                {
                     None
                 } else {
                     Some(old_value.clone().unwrap_or(LiteralValue::Empty))
@@ -1453,6 +1606,10 @@ where
                 col: addr.coord.col(),
             });
 
+            self.remember_spill_clears(&unsafe { (&*capture_ptr).events() }[start_len..]);
+            if let Some(mask) = self.spill_projection_history.get_mut(&addr) {
+                *mask = false;
+            }
             if let Some(undo_ptr) = self.arrow_undo {
                 let new_events = &unsafe { (&*capture_ptr).events() }[start_len..];
                 let undo = unsafe { &mut *undo_ptr };
@@ -1472,6 +1629,41 @@ where
         }
     }
 
+    /// Resize a table within this action so rollback and history include its extent.
+    pub fn resize_table(
+        &mut self,
+        name: &str,
+        new_end_row: u32,
+    ) -> Result<TableMetadata, crate::engine::EditorError> {
+        self.resize_table_body(name, new_end_row, false)
+    }
+
+    /// Resize and explicitly set the logical body state within this action.
+    pub fn resize_table_body(
+        &mut self,
+        name: &str,
+        new_end_row: u32,
+        empty_body: bool,
+    ) -> Result<TableMetadata, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
+        let range = self.engine.table_resize_range(name, new_end_row)?;
+        if let Some(capture_ptr) = self.capture {
+            self.engine
+                .edit_with_capture(unsafe { &mut *capture_ptr }, |editor| {
+                    editor.resize_table_body(name, range, empty_body)
+                })??;
+        } else {
+            return self
+                .engine
+                .resize_table_body(name, new_end_row, empty_body)
+                .map_err(Into::into);
+        }
+        Ok(self
+            .engine
+            .table_metadata(name)
+            .expect("resized table exists"))
+    }
+
     #[inline]
     pub fn set_row_hidden(
         &mut self,
@@ -1480,6 +1672,7 @@ where
         hidden: bool,
         source: RowVisibilitySource,
     ) -> Result<(), crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if self.capture.is_some() {
             let sheet_id = self.engine.ensure_known_sheet_id(sheet)?;
             let row0 = Engine::<R>::normalize_row_1based(row_1based)?;
@@ -1526,6 +1719,7 @@ where
         hidden: bool,
         source: RowVisibilitySource,
     ) -> Result<(), crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if self.capture.is_some() {
             let sheet_id = self.engine.ensure_known_sheet_id(sheet)?;
             let (start_row0, end_row0) =
@@ -1576,6 +1770,7 @@ where
         before: u32,
         count: u32,
     ) -> Result<crate::engine::ShiftSummary, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::ShiftSummary::default());
         }
@@ -1591,6 +1786,18 @@ where
             let sheet_id = self.engine.graph.sheet_id_mut(sheet);
             let occupancy = self.engine.structural_row_occupancy(sheet, sheet_id);
             let affected_region = Engine::<R>::structural_row_region(sheet_id, before0);
+            let mut spill_masks = self.spill_history_masks_before_insert(sheet_id, before0, true);
+
+            // Capture/mirror the clear before the structural graph and Arrow
+            // moves, and journal it before the insert's inverse Arrow operation.
+            let cleared_spill_cells = self.engine.clear_spills_before_structural_edit(
+                sheet_id,
+                before0,
+                true,
+                Some(unsafe { &mut *capture_ptr }),
+                self.arrow_undo.map(|ptr| unsafe { &mut *ptr }),
+            )?;
+            spill_masks.extend(cleared_spill_cells.iter().copied());
 
             // Graph structural insert (logged) - no snapshot bump.
             let summary = {
@@ -1609,18 +1816,38 @@ where
             if let Some(asheet) = self.engine.arrow_sheets.sheet_mut(sheet) {
                 asheet.insert_rows(before0 as usize, count as usize);
             }
+            for cell in cleared_spill_cells {
+                self.spill_projection_history.entry(cell).or_insert(true);
+            }
+            self.shift_spill_history(sheet_id, before0, count, true);
+            if let Some(undo_ptr) = self.arrow_undo {
+                unsafe { &mut *undo_ptr }.record_insert_rows(sheet_id, before0, count);
+            }
             self.engine
                 .purge_derived_formats_after_row(sheet_id, before0);
             self.engine
                 .shift_row_visibility_insert(sheet_id, before0, count);
             self.engine.mark_moved_formula_vertices_dirty(&summary);
+            if let Some(undo_ptr) = self.arrow_undo {
+                self.engine.journal_structural_computed_clear(
+                    sheet,
+                    before0 as usize,
+                    true,
+                    unsafe { &mut *undo_ptr },
+                );
+            }
             self.engine
                 .clear_computed_overlay_after_row(sheet, before0 as usize);
+            self.engine.restore_shifted_spill_tombstones(
+                spill_masks,
+                before0,
+                count,
+                true,
+                true,
+                self.arrow_undo.map(|ptr| unsafe { &mut *ptr }),
+            );
             self.engine
                 .record_structural_change(StructuralScope::Region(affected_region));
-            if let Some(undo_ptr) = self.arrow_undo {
-                unsafe { &mut *undo_ptr }.record_insert_rows(sheet_id, before0, count);
-            }
             Ok(summary)
         } else {
             self.engine.insert_rows(sheet, before, count)
@@ -1634,6 +1861,7 @@ where
         start: u32,
         count: u32,
     ) -> Result<crate::engine::ShiftSummary, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::ShiftSummary::default());
         }
@@ -1654,6 +1882,7 @@ where
         before: u32,
         count: u32,
     ) -> Result<crate::engine::ShiftSummary, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::ShiftSummary::default());
         }
@@ -1670,6 +1899,18 @@ where
             let sheet_id = self.engine.graph.sheet_id_mut(sheet);
             let occupancy = self.engine.structural_column_occupancy();
             let affected_region = Engine::<R>::structural_col_region(sheet_id, before0);
+            let mut spill_masks = self.spill_history_masks_before_insert(sheet_id, before0, false);
+
+            // Capture/mirror the clear before the structural graph and Arrow
+            // moves, and journal it before the insert's inverse Arrow operation.
+            let cleared_spill_cells = self.engine.clear_spills_before_structural_edit(
+                sheet_id,
+                before0,
+                false,
+                Some(unsafe { &mut *capture_ptr }),
+                self.arrow_undo.map(|ptr| unsafe { &mut *ptr }),
+            )?;
+            spill_masks.extend(cleared_spill_cells.iter().copied());
 
             let summary = {
                 let capture = unsafe { &mut *capture_ptr };
@@ -1686,16 +1927,36 @@ where
             if let Some(asheet) = self.engine.arrow_sheets.sheet_mut(sheet) {
                 asheet.insert_columns(before0 as usize, count as usize);
             }
-            self.engine
-                .purge_derived_formats_after_col(sheet_id, before0);
-            self.engine.mark_moved_formula_vertices_dirty(&summary);
-            self.engine
-                .clear_computed_overlay_after_col(sheet, before0 as usize);
-            self.engine
-                .record_structural_change(StructuralScope::Region(affected_region));
+            for cell in cleared_spill_cells {
+                self.spill_projection_history.entry(cell).or_insert(true);
+            }
+            self.shift_spill_history(sheet_id, before0, count, false);
             if let Some(undo_ptr) = self.arrow_undo {
                 unsafe { &mut *undo_ptr }.record_insert_cols(sheet_id, before0, count);
             }
+            self.engine
+                .purge_derived_formats_after_col(sheet_id, before0);
+            self.engine.mark_moved_formula_vertices_dirty(&summary);
+            if let Some(undo_ptr) = self.arrow_undo {
+                self.engine.journal_structural_computed_clear(
+                    sheet,
+                    before0 as usize,
+                    false,
+                    unsafe { &mut *undo_ptr },
+                );
+            }
+            self.engine
+                .clear_computed_overlay_after_col(sheet, before0 as usize);
+            self.engine.restore_shifted_spill_tombstones(
+                spill_masks,
+                before0,
+                count,
+                false,
+                true,
+                self.arrow_undo.map(|ptr| unsafe { &mut *ptr }),
+            );
+            self.engine
+                .record_structural_change(StructuralScope::Region(affected_region));
             Ok(summary)
         } else {
             self.engine.insert_columns(sheet, before, count)
@@ -1709,6 +1970,7 @@ where
         start: u32,
         count: u32,
     ) -> Result<crate::engine::ShiftSummary, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::ShiftSummary::default());
         }
@@ -1732,6 +1994,7 @@ where
         name: impl AsRef<str>,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<T, crate::engine::EditorError> {
+        self.engine.ensure_not_poisoned()?;
         self.engine.action(name, f)
     }
 }
@@ -1748,6 +2011,23 @@ impl<'a, R> Drop for ActionDepthGuard<'a, R> {
         unsafe {
             let e = &mut *self.engine;
             e.action_depth = e.action_depth.saturating_sub(1);
+        }
+    }
+}
+
+struct DeferredDirtyGuard<'a, R> {
+    engine: *mut Engine<R>,
+    _marker: std::marker::PhantomData<&'a mut Engine<R>>,
+}
+
+impl<'a, R> Drop for DeferredDirtyGuard<'a, R> {
+    fn drop(&mut self) {
+        // Safety: created from a unique `&mut Engine` borrow for the duration
+        // of the enclosing call and dropped after any inner reborrow ends.
+        // Call `graph.end_deferred_dirty()` directly rather than `Engine::end_deferred_dirty()`
+        // so unwinding on a poisoned engine cannot double-panic.
+        unsafe {
+            let _ = (&mut *self.engine).graph.end_deferred_dirty();
         }
     }
 }
@@ -1942,6 +2222,8 @@ pub struct TableMetadata {
     pub header_row: bool,
     pub headers: Vec<String>,
     pub totals_row: bool,
+    /// The reserved physical body row represents zero logical records.
+    pub empty_body: bool,
 }
 
 /// Read-only engine counters used by benchmark/instrumentation tooling.
@@ -2190,7 +2472,11 @@ mod vertex_id_runs_tests {
 }
 
 /// Uncacheable requests keep their schedule inline without a shared allocation.
-enum EvaluationSchedule {
+#[path = "recalc_job.rs"]
+mod job_driver;
+pub(super) use job_driver::HeldRecalcSchedule;
+
+pub(super) enum EvaluationSchedule {
     Owned(crate::engine::scheduler::Schedule),
     Shared(Arc<crate::engine::scheduler::Schedule>),
 }
@@ -2410,16 +2696,16 @@ pub(crate) mod visibility_mask_test_hooks {
 fn is_numeric_text_equality(pred: &crate::args::CriteriaPredicate) -> bool {
     match pred {
         crate::args::CriteriaPredicate::Eq(formualizer_common::LiteralValue::Text(text)) => {
-            text.trim().parse::<f64>().is_ok_and(f64::is_finite)
+            crate::builtins::utils::criteria_numeric_text_target(text).is_some()
         }
         _ => false,
     }
 }
 
 /// Resolve the null (non-number) rows of an `=n` / `<>n` criteria mask over
-/// one row segment: numeric text compares by value, every other non-number
-/// cell (blank, boolean, error) is unequal. Segments without text stay
-/// vectorized.
+/// one row segment: numeric text compares by value, and for `=n` so does date
+/// text; every other non-number cell (blank, boolean, error) is unequal.
+/// Segments without text stay vectorized.
 fn fill_numeric_equality_nulls(
     view: &RangeView<'_>,
     row_start: usize,
@@ -2438,7 +2724,7 @@ fn fill_numeric_equality_nulls(
                 // Nulls are already "no match".
                 return Some(mask.clone());
             }
-            let nulls = arrow::compute::is_null(mask).ok()?;
+            let nulls = arrow_arith::boolean::is_null(mask).ok()?;
             crate::compute_prelude::boolean::or_kleene(mask, &nulls).ok()
         }
         Some(text) => {
@@ -2450,9 +2736,16 @@ fn fill_numeric_equality_nulls(
                 if mask.is_valid(i) {
                     out.append_value(mask.value(i));
                 } else if text.is_valid(i) {
-                    let equal = crate::locale::Locale::invariant()
-                        .parse_number_invariant(text.value(i))
-                        .is_some_and(|x| (x - n).abs() < 1e-12);
+                    // `=n` reads date text too; `<>n` reads numeric text only.
+                    let number = if ne {
+                        crate::builtins::utils::criteria_numeric_text(text.value(i))
+                    } else {
+                        crate::builtins::utils::criteria_text_number(
+                            text.value(i),
+                            view.sheet().date_system,
+                        )
+                    };
+                    let equal = number.is_some_and(|x| (x - n).abs() < 1e-12);
                     out.append_value(equal != ne);
                 } else {
                     out.append_value(ne);
@@ -2463,16 +2756,50 @@ fn fill_numeric_equality_nulls(
     }
 }
 
+/// A criterion's text as an Arrow LIKE pattern. Arrow LIKE uses backslash
+/// escapes, and `%`, `_` and `\` are literal in Excel, so they are escaped;
+/// with `wildcards`, Excel's `*` and `?` become `%` and `_`. Every criteria
+/// kernel that compares text with `ilike`/`nilike` builds its pattern here.
+fn like_pattern(text: &str, wildcards: bool) -> String {
+    let mut pattern = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                pattern.push('\\');
+                pattern.push(ch);
+            }
+            '*' if wildcards => pattern.push('%'),
+            '?' if wildcards => pattern.push('_'),
+            _ => pattern.push(ch),
+        }
+    }
+    pattern
+}
+
 fn compute_criteria_mask(
     view: &RangeView<'_>,
     col_in_view: usize,
     pred: &crate::args::CriteriaPredicate,
 ) -> Option<std::sync::Arc<arrow_array::BooleanArray>> {
-    use crate::compute_prelude::{boolean, cmp, concat_arrays};
-    use arrow::compute::kernels::comparison::{ilike, nilike};
+    // The mask is for one column: build it from that column alone. Slicing the whole view for
+    // each of its columns made a criteria range along a row cost the square of its width. Only
+    // a column inside a nonempty view without a tail is narrowed: a column past the view's
+    // width (another range of the formula may be wider) keeps the old answer, as `sub_view`
+    // does not clip to its parent.
+    let narrowed;
+    let (rows, cols) = view.dims();
+    let (view, col_in_view) = if rows > 0 && cols > 1 && col_in_view < cols && view.tail().is_none()
+    {
+        narrowed = view.sub_view(0, col_in_view, rows, 1);
+        (&narrowed, 0usize)
+    } else {
+        (view, col_in_view)
+    };
+    use crate::compute_prelude::{boolean, cmp, concat_engine_arrays as concat_arrays};
     use arrow_array::{
         Array as _, ArrayRef, BooleanArray, Float64Array, StringArray, builder::BooleanBuilder,
     };
+    use arrow_string::like::{ilike, nilike};
 
     // Helper: apply a numeric predicate to a single Float64Array chunk
     fn apply_numeric_pred(
@@ -2534,7 +2861,8 @@ fn compute_criteria_mask(
         let mut bool_parts: Vec<BooleanArray> = Vec::new();
         // `=n` / `<>n`: the number lane is null for blank, text, boolean and
         // error cells. Blanks, booleans and errors never equal a number;
-        // numeric text does (`5` matches "5"), as in `criteria_match`.
+        // numeric text does (`5` matches "5"), and so does date text for `=n`,
+        // as in `criteria_match`.
         let number = |v: &formualizer_common::LiteralValue| match v {
             formualizer_common::LiteralValue::Number(n) => Some(*n),
             formualizer_common::LiteralValue::Int(i) => Some(*i as f64),
@@ -2578,9 +2906,11 @@ fn compute_criteria_mask(
     // Wildcards and numeric text equality can match non-text cells. The lowered
     // base lane is text-only, unlike the scalar matcher. Keep the vectorized
     // path for text-only data, but cache a scalar-equivalent mask for mixed data.
-    if is_numeric_text_equality(pred)
-        || matches!(pred, crate::args::CriteriaPredicate::TextLike { .. })
-    {
+    // Numeric text equality (`"36459"`) also matches date text by serial, which
+    // the text lane cannot express, so a column with date text is mixed too.
+    let numeric_text_equality = is_numeric_text_equality(pred);
+    if numeric_text_equality || matches!(pred, crate::args::CriteriaPredicate::TextLike { .. }) {
+        let mut mixed = false;
         for tags in view.type_tags_slices() {
             let (_, _, cols) = tags.ok()?;
             let tags = cols.get(col_in_view)?;
@@ -2589,18 +2919,38 @@ fn compute_criteria_mask(
                     || *tag == crate::arrow_store::TypeTag::Number as u8
                     || *tag == crate::arrow_store::TypeTag::Boolean as u8
             }) {
-                let mut mask = BooleanBuilder::new();
-                for chunk in view.iter_row_chunks() {
-                    let chunk = chunk.ok()?;
-                    for row in chunk.row_start..chunk.row_start + chunk.row_len {
-                        mask.append_value(crate::builtins::criteria_match(
-                            pred,
-                            &view.get_cell(row, col_in_view),
-                        ));
-                    }
-                }
-                return Some(std::sync::Arc::new(mask.finish()));
+                mixed = true;
+                break;
             }
+        }
+        let date_text = || {
+            view.lowered_text_slices().any(|slice| {
+                slice.is_ok_and(|(_, _, cols)| {
+                    cols.get(col_in_view).is_some_and(|text| {
+                        text.iter().flatten().any(|t| {
+                            crate::builtins::utils::criteria_date_text_serial(
+                                t,
+                                view.sheet().date_system,
+                            )
+                            .is_some()
+                        })
+                    })
+                })
+            })
+        };
+        if mixed || (numeric_text_equality && date_text()) {
+            let mut mask = BooleanBuilder::new();
+            for chunk in view.iter_row_chunks() {
+                let chunk = chunk.ok()?;
+                for row in chunk.row_start..chunk.row_start + chunk.row_len {
+                    mask.append_value(crate::builtins::utils::criteria_match_for(
+                        pred,
+                        &view.get_cell(row, col_in_view),
+                        view.sheet().date_system,
+                    ));
+                }
+            }
+            return Some(std::sync::Arc::new(mask.finish()));
         }
     }
 
@@ -2645,22 +2995,6 @@ fn compute_criteria_mask(
         };
     }
 
-    // Arrow LIKE uses backslash escapes; SQL punctuation is literal in Excel.
-    let like_pattern = |text: &str, wildcards: bool| {
-        let mut pattern = String::with_capacity(text.len());
-        for ch in text.chars() {
-            match ch {
-                '%' | '_' | '\\' => {
-                    pattern.push('\\');
-                    pattern.push(ch);
-                }
-                '*' if wildcards => pattern.push('%'),
-                '?' if wildcards => pattern.push('_'),
-                _ => pattern.push(ch),
-            }
-        }
-        pattern
-    };
     let (text_kind, text_pat, empty_special) = match pred {
         crate::args::CriteriaPredicate::Eq(formualizer_common::LiteralValue::Text(t)) => {
             (0u8, like_pattern(&t.to_lowercase(), false), t.is_empty())
@@ -2819,6 +3153,31 @@ pub fn formula_plane_mode_ignored_for_test() -> bool {
     plane_mode_ignored()
 }
 
+/// Whether `ast` calls `CELL` with `filename`, or an info type only known when
+/// it is evaluated.
+fn reads_workbook_identity(ast: &ASTNode) -> bool {
+    match &ast.node_type {
+        ASTNodeType::Function { name, args } => {
+            (name.eq_ignore_ascii_case("CELL")
+                && !matches!(
+                    args.first().map(|info| &info.node_type),
+                    Some(ASTNodeType::Literal(LiteralValue::Text(info)))
+                        if !info.eq_ignore_ascii_case("filename")
+                ))
+                || args.iter().any(reads_workbook_identity)
+        }
+        ASTNodeType::Call { callee, args } => {
+            reads_workbook_identity(callee) || args.iter().any(reads_workbook_identity)
+        }
+        ASTNodeType::UnaryOp { expr, .. } => reads_workbook_identity(expr),
+        ASTNodeType::BinaryOp { left, right, .. } => {
+            reads_workbook_identity(left) || reads_workbook_identity(right)
+        }
+        ASTNodeType::Array(rows) => rows.iter().flatten().any(reads_workbook_identity),
+        ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } | ASTNodeType::Omitted => false,
+    }
+}
+
 impl<R> Engine<R>
 where
     R: EvaluationContext,
@@ -2830,6 +3189,7 @@ where
     /// rejects these at build; this re-validates configs assembled via
     /// struct literals.
     pub fn new(resolver: R, config: EvalConfig) -> Self {
+        let resolver = crate::guarded_resolver::GuardedResolver::new(resolver);
         // Under the unified authority the FormulaPlane mode is accepted and
         // ignored (design §10). Normalizing the stored mode keeps external
         // readers of `config` (loaders choosing a span-preparation route) on
@@ -2891,10 +3251,12 @@ where
         let lookup_cache_max_bytes = config.lookup_index_cache_max_bytes;
         let function_provider_revision_seen = resolver.planning_semantic_revision();
         let mut engine = Self {
+            workbook_path: None,
             criteria_mask_cache: Default::default(),
             graph: DependencyGraph::new_with_config(config.clone()),
             resolver,
             resolved_functions: Default::default(),
+            operation_diagnostic_collector: None,
             resolved_sheet_names: FxHashMap::default(),
             resolution_sheet_revision: None,
             resolution_arrow_sheet_names: Vec::new(),
@@ -2905,7 +3267,13 @@ where
             clock: crate::timezone::SnapshotClock::new(clock),
             thread_pool,
             recalc_epoch: 0,
+            resumable: None,
+            resumable_call: false,
+            recalc_options: None,
+            #[cfg(test)]
+            resumable_stop_after_units_for_test: None,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            source_mutation_generation: 0,
             topology_epoch: 0,
             cached_static_schedule: None,
             recent_schedules: Vec::new(),
@@ -2928,6 +3296,8 @@ where
             chained_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             lane_clean_reads_for_test: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            aggregate_kernel_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             criteria_kernel_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -2970,6 +3340,11 @@ where
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
             next_evaluation_resource_request_id: 1,
+            poisoned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            panic_internal_once: false,
+            #[cfg(test)]
+            panic_kernel_after_member: std::sync::atomic::AtomicUsize::new(usize::MAX),
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
             last_evaluation_resource_request: None,
@@ -2983,6 +3358,7 @@ where
             pending_iterative_redirty: Vec::new(),
             snapshot_evaluation_active: false,
             snapshot_volatile_redirty_pending: false,
+            snapshot_iterative_redirty_pending: Vec::new(),
             retained_scc_members: FxHashMap::default(),
             next_retained_scc_id: 0,
             retained_scc_config_fingerprint: 0,
@@ -3036,6 +3412,7 @@ where
         config: EvalConfig,
         thread_pool: Arc<rayon::ThreadPool>,
     ) -> Self {
+        let resolver = crate::guarded_resolver::GuardedResolver::new(resolver);
         if let Err(msg) = config.cycle.validate() {
             panic!("invalid CycleConfig: {msg}");
         }
@@ -3065,10 +3442,12 @@ where
         let lookup_cache_max_bytes = config.lookup_index_cache_max_bytes;
         let function_provider_revision_seen = resolver.planning_semantic_revision();
         let mut engine = Self {
+            workbook_path: None,
             criteria_mask_cache: Default::default(),
             graph: DependencyGraph::new_with_config(config.clone()),
             resolver,
             resolved_functions: Default::default(),
+            operation_diagnostic_collector: None,
             resolved_sheet_names: FxHashMap::default(),
             resolution_sheet_revision: None,
             resolution_arrow_sheet_names: Vec::new(),
@@ -3079,7 +3458,13 @@ where
             clock: crate::timezone::SnapshotClock::new(clock),
             thread_pool: Some(thread_pool),
             recalc_epoch: 0,
+            resumable: None,
+            resumable_call: false,
+            recalc_options: None,
+            #[cfg(test)]
+            resumable_stop_after_units_for_test: None,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            source_mutation_generation: 0,
             topology_epoch: 0,
             cached_static_schedule: None,
             recent_schedules: Vec::new(),
@@ -3102,6 +3487,8 @@ where
             chained_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             lane_clean_reads_for_test: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            aggregate_kernel_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             criteria_kernel_members_for_test: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -3144,6 +3531,11 @@ where
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
             next_evaluation_resource_request_id: 1,
+            poisoned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            panic_internal_once: false,
+            #[cfg(test)]
+            panic_kernel_after_member: std::sync::atomic::AtomicUsize::new(usize::MAX),
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
             last_evaluation_resource_request: None,
@@ -3157,6 +3549,7 @@ where
             pending_iterative_redirty: Vec::new(),
             snapshot_evaluation_active: false,
             snapshot_volatile_redirty_pending: false,
+            snapshot_iterative_redirty_pending: Vec::new(),
             retained_scc_members: FxHashMap::default(),
             next_retained_scc_id: 0,
             retained_scc_config_fingerprint: 0,
@@ -3205,7 +3598,11 @@ where
         &self.workbook_load_limits
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_workbook_load_limits(&mut self, limits: crate::engine::WorkbookLoadLimits) {
+        self.assert_not_poisoned();
         self.workbook_load_limits = limits;
     }
 
@@ -3250,7 +3647,11 @@ where
     }
 
     /// Reset accumulated and last-request observations without reusing request IDs.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn reset_evaluation_resource_telemetry(&mut self) {
+        self.assert_not_poisoned();
         self.evaluation_resource_baseline = EvaluationResourceBaselineStats::default();
         self.last_evaluation_resource_request = None;
     }
@@ -3292,6 +3693,15 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn request_scope_for_test(&self) -> (usize, bool, bool) {
+        (
+            self.evaluation_resource_request_depth,
+            self.resumable_call,
+            self.active_cancel_flag.is_some(),
+        )
+    }
+
     fn duration_ns(duration: std::time::Duration) -> u64 {
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
@@ -3301,7 +3711,41 @@ where
         kind: EvaluationRequestKind,
         evaluate: impl FnOnce(&mut Self) -> Result<T, ExcelError>,
     ) -> Result<T, ExcelError> {
+        self.ensure_not_poisoned()?;
         let outermost = self.evaluation_resource_request_depth == 0;
+        let _unwind_poison =
+            outermost.then(|| super::poison::UnwindPoisonGuard(self.poisoned.clone()));
+        if outermost && !self.resumable_call && self.has_active_recalc_job() {
+            return Err(Self::active_recalc_job_error());
+        }
+        // Foreign requests settle the logical recalculation before any early
+        // admission/cancellation exit. Every resumable pass is already settled.
+        if outermost && !self.resumable_call && self.resumable.take().is_some() {
+            self.redirty_for_next_recalc();
+            self.freshness_begin_request();
+        }
+        // Resumable calls have per-call resource ledgers, but one collector.
+        let continuing = self.resumable_call && self.resumable.is_some();
+        if outermost {
+            self.resolver
+                .callbacks
+                .begin(self.operation_diagnostic_collector.as_ref(), !continuing);
+        }
+        let _callbacks = crate::external_callbacks::enter(self.resolver.callbacks.clone());
+        // Request evidence starts here, before cancellation/admission can exit.
+        // Nested entry points and internal replans retain the outer union.
+        if outermost
+            && !continuing
+            && let Some(collector) = &self.operation_diagnostic_collector
+        {
+            collector.reset();
+        }
+        if outermost {
+            let pending = std::mem::take(&mut self.snapshot_iterative_redirty_pending);
+            if !pending.is_empty() {
+                self.graph.redirty_iterative_members(&pending);
+            }
+        }
         if outermost && self.snapshot_volatile_redirty_pending {
             self.snapshot_volatile_redirty_pending = false;
             self.graph.redirty_volatiles();
@@ -3346,19 +3790,32 @@ where
             self.evaluation_resource_baseline.record_started(request_id);
             self.evaluation_resource_request_started_at = Some(crate::instant::FzInstant::now());
             self.source_cache_accounted = 0;
-            self.active_resource_ledger = Some(ResourceLedger::new(
-                Some(request_id),
-                self.evaluation_resource_budgets.clone(),
-            ));
+            let mut ledger =
+                ResourceLedger::new(Some(request_id), self.evaluation_resource_budgets.clone());
+            if self.resumable_call
+                && let Some(state) = &self.resumable
+            {
+                ledger.resume_job(state.work_units, state.active_elapsed);
+            }
+            self.active_resource_ledger = Some(ledger);
         }
         self.evaluation_resource_request_depth =
             self.evaluation_resource_request_depth.saturating_add(1);
+        #[cfg(test)]
+        if outermost && std::mem::take(&mut self.panic_internal_once) {
+            panic!("injected internal evaluation panic");
+        }
         let result = if outermost {
             self.reconcile_source_cache_footprints()
                 .and_then(|()| self.resource_checkpoint(0))
                 .and_then(|()| evaluate(self))
         } else {
             evaluate(self)
+        };
+        let result = if let Some(error) = crate::external_callbacks::pending() {
+            Err(error)
+        } else {
+            result
         };
         if outermost && result.is_err() {
             self.freshness_abort_pass();
@@ -3372,6 +3829,10 @@ where
             Ok(())
         };
         let result = result.and_then(|value| reconciliation.map(|()| value));
+        if outermost && result.is_err() {
+            self.freshness_abort_pass();
+            self.freshness_discard_read_evidence();
+        }
         if outermost {
             let total_ns = self
                 .evaluation_resource_request_started_at
@@ -3387,6 +3848,12 @@ where
                 .take()
                 .expect("outer evaluation resource request has active ledger");
             ledger.release_all_scratch();
+            if self.resumable_call
+                && let Some(state) = &mut self.resumable
+            {
+                state.work_units = ledger.snapshot().work_charged;
+                state.active_elapsed += std::time::Duration::from_nanos(total_ns);
+            }
             stats.ledger.update(ledger.snapshot());
             stats.outcome = match &result {
                 Ok(_) => EvaluationRequestOutcome::Success,
@@ -3423,10 +3890,17 @@ where
                 )
             );
         }
+        if self.resolver.callbacks.failed() && self.resumable.is_none() {
+            self.resolved_functions = Default::default();
+        }
         result
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_evaluation_resource_budgets(&mut self, budgets: crate::engine::EvaluationBudgets) {
+        self.assert_not_poisoned();
         self.evaluation_resource_budgets = budgets.clone();
         self.config.evaluation_budgets = budgets.clone();
         self.graph.set_evaluation_budgets(budgets);
@@ -3746,6 +4220,9 @@ where
     }
 
     fn refresh_resolution_snapshots(&mut self) {
+        if self.resolver.callbacks.failed() {
+            self.resolved_functions = Default::default();
+        }
         self.resolved_functions
             .refresh(self.graph.data_store(), &self.resolver);
         let named_asts = self
@@ -3819,6 +4296,67 @@ where
             }
         }
         self.resolution_sheet_revision = Some(revision);
+    }
+
+    /// Enable request-operation evidence before ingestion/evaluation.
+    /// Each evaluation request resets events; this is not retained-result coverage.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
+    pub fn enable_operation_diagnostics(&mut self, sample_limit: usize) {
+        self.assert_not_poisoned();
+        self.configure_operation_diagnostics(
+            crate::operation_diagnostics::OperationDiagnosticOptions {
+                sample_limit,
+                physical_telemetry: true,
+                ..Default::default()
+            },
+        );
+    }
+
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
+    pub fn configure_operation_diagnostics(
+        &mut self,
+        options: crate::operation_diagnostics::OperationDiagnosticOptions,
+    ) {
+        self.assert_not_poisoned();
+        self.operation_diagnostic_collector = Some(Arc::new(
+            crate::operation_diagnostics::OperationDiagnosticCollector::with_options(options),
+        ));
+    }
+
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
+    pub fn disable_operation_diagnostics(&mut self) {
+        self.assert_not_poisoned();
+        self.operation_diagnostic_collector = None;
+    }
+
+    pub fn operation_diagnostics(
+        &self,
+    ) -> Result<Option<crate::operation_diagnostics::OperationDiagnostics>, ExcelError> {
+        self.operation_diagnostic_collector
+            .as_ref()
+            .map(|collector| collector.snapshot())
+            .transpose()
+    }
+
+    /// Finalize exact request evidence once, without disabling next-request collection.
+    pub fn take_operation_diagnostics(
+        &mut self,
+    ) -> Result<Option<crate::operation_diagnostics::OperationDiagnostics>, ExcelError> {
+        self.ensure_not_poisoned()?;
+        self.operation_diagnostic_collector
+            .as_mut()
+            .map(|collector| collector.take_shared_snapshot())
+            .transpose()
+    }
+
+    pub(super) fn diagnostic_request_active(&self) -> bool {
+        self.evaluation_resource_request_depth != 0
     }
 
     fn begin_evaluation_request(&mut self) {
@@ -3899,7 +4437,11 @@ where
             }
         }
         if !pending.is_empty() {
-            self.graph.redirty_iterative_members(&pending);
+            if self.snapshot_evaluation_active {
+                self.snapshot_iterative_redirty_pending.extend(pending);
+            } else {
+                self.graph.redirty_iterative_members(&pending);
+            }
         }
     }
 
@@ -4020,29 +4562,13 @@ where
     }
 
     fn lookup_view_contains_volatile(&self, view: &RangeView<'_>, sheet_id: SheetId) -> bool {
-        let start_row = view.start_row();
-        let end_row = view.end_row();
-        let start_col = view.start_col();
-        let end_col = view.end_col();
-        for row in start_row..=end_row {
-            let Ok(row_u32) = u32::try_from(row) else {
-                return true;
-            };
-            for col in start_col..=end_col {
-                let Ok(col_u32) = u32::try_from(col) else {
-                    return true;
-                };
-                let cell_ref = self
-                    .graph
-                    .make_cell_ref_internal(sheet_id, row_u32, col_u32);
-                if let Some(vertex_id) = self.graph.get_vertex_id_for_address(&cell_ref)
-                    && self.graph.is_volatile(vertex_id)
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        self.graph.has_volatile_in_range(
+            sheet_id,
+            view.start_row(),
+            view.end_row(),
+            view.start_col(),
+            view.end_col(),
+        )
     }
 
     fn build_lookup_index_impl(
@@ -4050,6 +4576,9 @@ where
         view: &RangeView<'_>,
         axis: LookupAxis,
     ) -> Option<Arc<LookupIndex>> {
+        if view.tail().is_some() {
+            return None;
+        }
         let (rows, cols) = view.dims();
         if rows == 0 || cols == 0 {
             self.lookup_index_cache.note_skipped_tiny();
@@ -4222,6 +4751,19 @@ where
         table: &dyn crate::traits::Table,
         spec: &Option<formualizer_parse::parser::TableSpecifier>,
     ) -> Result<RangeView<'static>, ExcelError> {
+        let result = self.source_table_to_range_view_inner(table, spec);
+        if let Some(error) = crate::external_callbacks::pending() {
+            Err(error)
+        } else {
+            result
+        }
+    }
+
+    fn source_table_to_range_view_inner(
+        &self,
+        table: &dyn crate::traits::Table,
+        spec: &Option<formualizer_parse::parser::TableSpecifier>,
+    ) -> Result<RangeView<'static>, ExcelError> {
         use formualizer_parse::parser::{SpecialItem, TableSpecifier};
 
         let owned = match spec {
@@ -4319,17 +4861,29 @@ where
     }
 
     /// Update the workbook seed for deterministic RNGs in functions.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_workbook_seed(&mut self, seed: u64) {
+        self.assert_not_poisoned();
         self.config.workbook_seed = seed;
     }
 
     /// Set the volatile level policy (Always/OnRecalc/OnOpen)
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_volatile_level(&mut self, level: crate::traits::VolatileLevel) {
+        self.assert_not_poisoned();
         self.config.volatile_level = level;
     }
 
     /// Set public temporal materialisation to native values or raw serials.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_temporal_egress(&mut self, policy: crate::engine::TemporalEgress) {
+        self.assert_not_poisoned();
         self.config.temporal_egress = policy;
     }
 
@@ -4342,6 +4896,7 @@ where
         &mut self,
         mode: crate::engine::DeterministicMode,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let clock = mode.build_clock()?;
         self.config.deterministic_mode = mode;
         self.clock = crate::timezone::SnapshotClock::new(clock);
@@ -4355,7 +4910,11 @@ where
     /// it once at the start of every evaluation request and all reads within
     /// that recalc (including SCC iteration passes) observe the frozen
     /// sample.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_clock(&mut self, clock: Arc<dyn crate::timezone::ClockProvider>) {
+        self.assert_not_poisoned();
         self.clock = crate::timezone::SnapshotClock::new(clock);
     }
 
@@ -4367,13 +4926,63 @@ where
         self.graph.sheet_id(name)
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn sheet_id_mut(&mut self, name: &str) -> SheetId {
+        self.assert_not_poisoned();
         self.add_sheet(name)
             .unwrap_or_else(|_| self.graph.sheet_id_mut(name))
     }
 
     pub fn sheet_name(&self, id: SheetId) -> &str {
         self.graph.sheet_name(id)
+    }
+
+    /// Give the workbook the path `CELL("filename")` reports. It need not be a
+    /// location on this machine: the host chooses what results may disclose,
+    /// and the engine never takes it from the file it was loaded from. An
+    /// empty path means a workbook never saved; `None` means unknown. A change
+    /// marks the formulas that read it, and their dependents, dirty.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
+    pub fn set_workbook_path(&mut self, path: Option<String>) {
+        self.assert_not_poisoned();
+        if self.workbook_path != path {
+            self.workbook_path = path;
+            self.mark_workbook_identity_readers_dirty();
+        }
+    }
+
+    /// The path recorded by [`Self::set_workbook_path`].
+    pub fn workbook_path(&self) -> Option<&str> {
+        self.workbook_path.as_deref()
+    }
+
+    /// Formulas and defined names that call `CELL("filename")` answer from
+    /// the workbook path and sheet names, which no dependency edge tracks.
+    fn mark_workbook_identity_readers_dirty(&mut self) {
+        let formulas = self.graph.vertices_with_formulas().filter(|vertex| {
+            self.graph
+                .get_formula(*vertex)
+                .is_some_and(|ast| reads_workbook_identity(&ast))
+        });
+        let names = self
+            .graph
+            .named_ranges_iter()
+            .map(|(_, named)| named)
+            .chain(self.graph.sheet_named_ranges_iter().map(|(_, named)| named))
+            .filter(|named| {
+                matches!(
+                    &named.definition,
+                    crate::engine::named_range::NamedDefinition::Formula { ast, .. }
+                        if reads_workbook_identity(ast)
+                )
+            })
+            .map(|named| named.vertex);
+        let readers: Vec<VertexId> = formulas.chain(names).collect();
+        self.graph.mark_dirty_many(&readers);
     }
 
     fn arrow_sheet_position(&self, id: SheetId) -> Option<usize> {
@@ -4426,6 +5035,7 @@ where
     }
 
     pub fn add_sheet(&mut self, name: &str) -> Result<SheetId, ExcelError> {
+        self.ensure_not_poisoned()?;
         let id = self.graph.add_sheet(name)?;
         self.ensure_arrow_sheet(name);
         self.mark_topology_edited();
@@ -4433,6 +5043,7 @@ where
     }
 
     pub fn duplicate_sheet(&mut self, source: &str, new_name: &str) -> Result<SheetId, ExcelError> {
+        self.ensure_not_poisoned()?;
         let source_id = self.graph.sheet_id(source).ok_or_else(|| {
             ExcelError::new(ExcelErrorKind::Value).with_message("Source sheet does not exist")
         })?;
@@ -4487,6 +5098,7 @@ where
     }
 
     pub fn remove_sheet(&mut self, sheet_id: SheetId) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let name = self.graph.sheet_name(sheet_id).to_string();
         self.purge_derived_formats_for_sheet(sheet_id);
         self.graph.remove_sheet(sheet_id)?;
@@ -4521,6 +5133,7 @@ where
     }
 
     pub fn rename_sheet(&mut self, sheet_id: SheetId, new_name: &str) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let old_name = self.graph.sheet_name(sheet_id).to_string();
 
         // Speculative Storage Update
@@ -4540,6 +5153,7 @@ where
                 for v_id in sheet_vertices {
                     self.graph.mark_vertex_dirty(v_id);
                 }
+                self.mark_workbook_identity_readers_dirty();
                 // Sheet rename preserves SheetId and therefore formula dependencies.
                 self.mark_topology_edited();
                 Ok(())
@@ -4642,6 +5256,15 @@ where
         self.graph.get_value(entry.vertex)
     }
 
+    /// Whether a cell lies in a logically empty table's reserved body.
+    pub fn cell_in_empty_table(&self, sheet: &str, row: u32, col: u32) -> bool {
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return false;
+        };
+        let cell = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+        !self.graph.empty_tables_at(cell).is_empty()
+    }
+
     pub fn table_metadata(&self, name: &str) -> Option<TableMetadata> {
         let entry = self.graph.resolve_table_entry(name)?;
         Some(TableMetadata {
@@ -4654,6 +5277,7 @@ where
             header_row: entry.header_row,
             headers: entry.headers.clone(),
             totals_row: entry.totals_row,
+            empty_body: entry.empty_body,
         })
     }
 
@@ -4719,6 +5343,7 @@ where
         definition: NamedDefinition,
         scope: NameScope,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.validate_define_name(name, scope)?;
         self.graph.define_name(name, definition, scope)?;
         self.record_structural_change(StructuralScope::AllSheets);
@@ -4734,6 +5359,7 @@ where
         definition: NamedDefinition,
         scope: NameScope,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.validate_existing_name(name, scope)?;
         self.graph.update_name(name, definition, scope)?;
         self.record_structural_change(StructuralScope::AllSheets);
@@ -4744,6 +5370,7 @@ where
     }
 
     pub fn delete_name(&mut self, name: &str, scope: NameScope) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.validate_existing_name(name, scope)?;
         self.graph.delete_name(name, scope)?;
         self.record_structural_change(StructuralScope::AllSheets);
@@ -4761,6 +5388,7 @@ where
         headers: Vec<String>,
         totals_row: bool,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph
             .define_table(name, range, header_row, headers, totals_row)?;
         self.record_structural_change(StructuralScope::AllSheets);
@@ -4768,11 +5396,54 @@ where
         Ok(())
     }
 
+    fn table_resize_range(&self, name: &str, new_end_row: u32) -> Result<RangeRef, ExcelError> {
+        let entry = self.graph.resolve_table_entry(name).ok_or_else(|| {
+            ExcelError::new(ExcelErrorKind::Name).with_message(format!("Unknown table: {name}"))
+        })?;
+        let minimum = entry.range.start.coord.row()
+            + 1
+            + u32::from(entry.header_row)
+            + u32::from(entry.totals_row);
+        if new_end_row < minimum || new_end_row > 1_048_576 {
+            return Err(ExcelError::new(ExcelErrorKind::Value).with_message(
+                "Table resize must retain at least one body row within the sheet grid",
+            ));
+        }
+        let mut range = entry.range;
+        range.end.coord = Coord::from_excel(new_end_row, range.end.coord.col() + 1, true, true);
+        Ok(range)
+    }
+
+    /// Resize a native table's row extent. For history, use an EngineAction.
+    pub fn resize_table(
+        &mut self,
+        name: &str,
+        new_end_row: u32,
+    ) -> Result<TableMetadata, ExcelError> {
+        self.resize_table_body(name, new_end_row, false)
+    }
+
+    /// Resize a table, retaining a physical row for a logically empty body.
+    pub fn resize_table_body(
+        &mut self,
+        name: &str,
+        new_end_row: u32,
+        empty_body: bool,
+    ) -> Result<TableMetadata, ExcelError> {
+        self.ensure_not_poisoned()?;
+        let range = self.table_resize_range(name, new_end_row)?;
+        self.graph.resize_table_body(name, range, empty_body)?;
+        self.record_structural_change(StructuralScope::AllSheets);
+        self.mark_topology_edited();
+        Ok(self.table_metadata(name).expect("resized table exists"))
+    }
+
     pub fn define_source_scalar(
         &mut self,
         name: &str,
         version: Option<u64>,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.define_source_scalar(name, version)?;
         self.record_structural_change(StructuralScope::OpaqueGlobal);
         self.mark_topology_edited();
@@ -4784,6 +5455,7 @@ where
         name: &str,
         version: Option<u64>,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.define_source_table(name, version)?;
         self.record_structural_change(StructuralScope::OpaqueGlobal);
         self.mark_topology_edited();
@@ -4795,7 +5467,9 @@ where
         name: &str,
         version: Option<u64>,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.set_source_scalar_version(name, version)?;
+        self.source_mutation_generation = self.source_mutation_generation.wrapping_add(1);
         Ok(())
     }
 
@@ -4804,12 +5478,16 @@ where
         name: &str,
         version: Option<u64>,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.set_source_table_version(name, version)?;
+        self.source_mutation_generation = self.source_mutation_generation.wrapping_add(1);
         Ok(())
     }
 
     pub fn invalidate_source(&mut self, name: &str) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.graph.invalidate_source(name)?;
+        self.source_mutation_generation = self.source_mutation_generation.wrapping_add(1);
         Ok(())
     }
 
@@ -4819,6 +5497,25 @@ where
 
     pub fn graph_cell_value(&self, sheet: &str, row: u32, col: u32) -> Option<LiteralValue> {
         self.graph.get_cell_value(sheet, row, col)
+    }
+
+    /// Whether a cell belongs to a currently committed spill projection.
+    ///
+    /// This indexed ownership query does not read values, calculate spill
+    /// bounds, prepare formulas, or evaluate the workbook.
+    pub fn cell_has_spill_projection(&self, sheet: &str, row: u32, col: u32) -> bool {
+        if self.graph.spill_registry_is_empty() {
+            return false;
+        }
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return false;
+        };
+        let cell = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+        self.graph.spill_registry_anchor_for_cell(cell).is_some()
+            || self
+                .graph
+                .get_vertex_for_cell(&cell)
+                .is_some_and(|vertex| self.graph.spill_registry_has_anchor(vertex))
     }
 
     pub fn vertex_for_cell(&self, cell: &CellRef) -> Option<VertexId> {
@@ -4859,6 +5556,20 @@ where
         }
     }
 
+    /// Read-only queries must not observe a partially staged request/action.
+    pub(super) fn affected_closure_idle(&self) -> bool {
+        self.active_evaluation_resource_request.is_none()
+            && self.active_resource_ledger.is_none()
+            && self.action_depth == 0
+            && !self.freshness_armed()
+            && !self.has_staged_formulas()
+            && !self.graph.deferred_dirty_active()
+    }
+
+    pub(super) fn affected_closure_owner(&self) -> &Arc<()> {
+        &self.recalc_plan_token
+    }
+
     /// Mutation revision captured by read-only engine reports.
     pub(crate) fn inspection_mutation_revision(&self) -> u64 {
         self.snapshot_id.load(std::sync::atomic::Ordering::Relaxed)
@@ -4882,7 +5593,11 @@ where
             .unwrap_or((0, 0, 0, 0))
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_first_load_assume_new(&mut self, enabled: bool) {
+        self.assert_not_poisoned();
         self.graph.set_first_load_assume_new(enabled);
     }
 
@@ -4890,17 +5605,29 @@ where
         self.graph.first_load_assume_new()
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn reset_ensure_touched(&mut self) {
+        self.assert_not_poisoned();
         self.graph.reset_ensure_touched();
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn finalize_sheet_index(&mut self, sheet: &str) {
+        self.assert_not_poisoned();
         self.graph.finalize_sheet_index(sheet);
     }
 
     /// Rebuild the requested sheet indexes in a single coordinate-map pass.
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn finalize_all_sheet_indexes<'a>(&mut self, sheets: impl IntoIterator<Item = &'a str>) {
+        self.assert_not_poisoned();
         self.graph.finalize_all_sheet_indexes(sheets);
     }
 
@@ -4917,6 +5644,7 @@ where
         name: impl AsRef<str>,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<T, crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         if self.action_depth != 0 {
             return Err(crate::engine::EditorError::TransactionFailed {
                 reason: "Nested Engine::action calls are not supported (ticket 614: commit-only surface)"
@@ -4925,18 +5653,24 @@ where
         }
 
         self.action_depth = 1;
+        self.begin_deferred_dirty();
         let engine_ptr: *mut Engine<R> = self;
         let _guard = ActionDepthGuard {
             engine: engine_ptr,
             _marker: std::marker::PhantomData,
         };
+        let _dirty_guard = DeferredDirtyGuard {
+            engine: engine_ptr,
+            _marker: std::marker::PhantomData,
+        };
 
         let mut tx = EngineAction {
-            engine: self,
+            engine: unsafe { &mut *engine_ptr },
             name: name.as_ref().to_string(),
             capture: None,
             arrow_undo: None,
             atomic_policy: false,
+            spill_projection_history: Default::default(),
         };
         f(&mut tx)
     }
@@ -4949,6 +5683,7 @@ where
         name: impl Into<String>,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<T, crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let (v, _j) = self.action_atomic_journal(name, f)?;
         Ok(v)
     }
@@ -4959,6 +5694,7 @@ where
         name: impl Into<String>,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<(T, crate::engine::ActionJournal), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         if self.action_depth != 0 {
             return Err(crate::engine::EditorError::TransactionFailed {
                 reason: "Nested Engine::action calls are not supported (deterministic rule)"
@@ -4987,6 +5723,29 @@ where
         name: String,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<(T, crate::engine::ActionJournal), crate::engine::EditorError> {
+        self.begin_deferred_dirty();
+        let engine_ptr: *mut Engine<R> = self;
+        let _dirty_guard = DeferredDirtyGuard {
+            engine: engine_ptr,
+            _marker: std::marker::PhantomData,
+        };
+        unsafe { &mut *engine_ptr }.action_atomic_impl_inner(
+            capture,
+            start_len,
+            expand_runs,
+            name,
+            f,
+        )
+    }
+
+    fn action_atomic_impl_inner<T>(
+        &mut self,
+        capture: &mut MutationCapture,
+        start_len: usize,
+        expand_runs: bool,
+        name: String,
+        f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
+    ) -> Result<(T, crate::engine::ActionJournal), crate::engine::EditorError> {
         let invalidation_baseline = self.invalidation_baseline();
         let mut arrow_undo = crate::engine::ArrowUndoBatch::default();
         let arrow_ptr: *mut crate::engine::ArrowUndoBatch = &mut arrow_undo;
@@ -4998,6 +5757,7 @@ where
             capture: Some(capture_ptr),
             arrow_undo: Some(arrow_ptr),
             atomic_policy: true,
+            spill_projection_history: Default::default(),
         };
 
         let res = f(&mut tx);
@@ -5029,9 +5789,7 @@ where
         match res {
             Ok(v) => {
                 if !journal.graph.is_empty() || !journal.arrow.is_empty() || has_runs {
-                    for event in &journal.graph.events {
-                        self.record_change_for_event(event);
-                    }
+                    self.record_changes_for_events(&journal.graph.events);
                     let mut impact = Self::classify_change_events(
                         &journal.graph.events,
                         LoggedEditDirection::Original,
@@ -5054,9 +5812,10 @@ where
                     });
                 }
                 if !journal.graph.is_empty() || !journal.arrow.is_empty() {
-                    for event in &journal.graph.events {
-                        self.record_change_for_event(event);
-                    }
+                    // Rollback restored projection ownership just like undo.
+                    // Notify dependents without treating restored cells as
+                    // new user writes that release that ownership again.
+                    self.record_inverse_changes_for_events(&journal.graph.events);
                 }
                 Err(e)
             }
@@ -5075,6 +5834,7 @@ where
         name: impl AsRef<str>,
         f: impl FnOnce(&mut EngineAction<'_, R>) -> Result<T, crate::engine::EditorError>,
     ) -> Result<T, crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         if self.action_depth != 0 {
             return Err(crate::engine::EditorError::TransactionFailed {
                 reason: "Nested Engine::action calls are not supported (deterministic rule)"
@@ -5149,6 +5909,7 @@ where
         );
 
         // 1) Roll back the dependency graph.
+        self.graph.begin_deferred_dirty();
         self.graph
             .authority_set_replay(crate::engine::authority::history::Replay::Undo);
         let rolled_back = (|| {
@@ -5185,6 +5946,7 @@ where
         })();
         self.graph
             .authority_set_replay(crate::engine::authority::history::Replay::Forward);
+        let _ = self.graph.end_deferred_dirty();
         rolled_back?;
 
         // 2) Roll back engine row-visibility metadata.
@@ -5215,6 +5977,7 @@ where
         definition: NamedDefinition,
         scope: NameScope,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         self.graph
             .validate_define_name(name, scope)
             .map_err(crate::engine::EditorError::Excel)?;
@@ -5237,6 +6000,7 @@ where
         definition: NamedDefinition,
         scope: NameScope,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         self.graph
             .validate_existing_name(name, scope)
             .map_err(crate::engine::EditorError::Excel)?;
@@ -5257,6 +6021,7 @@ where
         name: &str,
         scope: NameScope,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         self.graph
             .validate_existing_name(name, scope)
             .map_err(crate::engine::EditorError::Excel)?;
@@ -5276,6 +6041,7 @@ where
         log: &mut crate::engine::ChangeLog,
         f: impl FnOnce(&mut crate::engine::VertexEditor) -> T,
     ) -> Result<T, crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let mut capture = MutationCapture::new(log.current_meta());
         let result = self.edit_with_capture(&mut capture, f);
         capture.close_compounds();
@@ -5292,6 +6058,20 @@ where
     }
 
     fn edit_with_capture<T>(
+        &mut self,
+        capture: &mut MutationCapture,
+        f: impl FnOnce(&mut crate::engine::VertexEditor) -> T,
+    ) -> Result<T, crate::engine::EditorError> {
+        self.begin_deferred_dirty();
+        let engine_ptr: *mut Engine<R> = self;
+        let _dirty_guard = DeferredDirtyGuard {
+            engine: engine_ptr,
+            _marker: std::marker::PhantomData,
+        };
+        unsafe { &mut *engine_ptr }.edit_with_capture_inner(capture, f)
+    }
+
+    fn edit_with_capture_inner<T>(
         &mut self,
         capture: &mut MutationCapture,
         f: impl FnOnce(&mut crate::engine::VertexEditor) -> T,
@@ -5363,9 +6143,7 @@ where
         for ev in &new_events {
             self.mirror_forward_change_to_arrow(ev);
         }
-        for ev in &new_events {
-            self.record_change_for_event(ev);
-        }
+        self.record_changes_for_events(&new_events);
 
         // Atomic EngineAction calls publish one invalidation for their complete
         // journal at commit/rollback. Direct logged edits publish here.
@@ -5490,6 +6268,7 @@ where
         undo: &mut crate::engine::graph::editor::undo_engine::UndoEngine,
         log: &mut crate::engine::ChangeLog,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let pending_events = log
             .last_group_indices()
             .into_iter()
@@ -5504,33 +6283,36 @@ where
             LoggedEditDirection::InverseReplay,
             invalidation_baseline,
         );
-        let batch = undo.undo(&mut self.graph, log)?;
-        for item in batch.iter().rev() {
-            self.apply_inverse_row_visibility_event(&item.event);
-            self.apply_inverse_staged_formula_event(&item.event);
-        }
-        if !batch.is_empty() {
-            let events = batch
-                .iter()
-                .map(|item| item.event.clone())
-                .collect::<Vec<_>>();
-            self.clear_logged_cell_format_states(&events);
-        }
-        self.mirror_undo_batch_to_arrow(&batch);
-        if !batch.is_empty() {
-            for item in &batch {
-                self.record_change_for_event(&item.event);
+        self.begin_deferred_dirty();
+        let res = (|| {
+            let batch = undo.undo(&mut self.graph, log)?;
+            for item in batch.iter().rev() {
+                self.apply_inverse_row_visibility_event(&item.event);
+                self.apply_inverse_staged_formula_event(&item.event);
             }
-        }
-        crate::engine::trace::fz_event!(
-            tracing::Level::INFO,
-            "history",
-            "history.replay",
-            op = "undo",
-            events_replayed = batch.len(),
-            ownership_resyncs = batch.len()
-        );
-        Ok(())
+            if !batch.is_empty() {
+                let events = batch
+                    .iter()
+                    .map(|item| item.event.clone())
+                    .collect::<Vec<_>>();
+                self.clear_logged_cell_format_states(&events);
+            }
+            self.mirror_undo_batch_to_arrow(&batch);
+            if !batch.is_empty() {
+                self.record_inverse_changes_for_events(batch.iter().map(|item| &item.event));
+            }
+            crate::engine::trace::fz_event!(
+                tracing::Level::INFO,
+                "history",
+                "history.replay",
+                op = "undo",
+                events_replayed = batch.len(),
+                ownership_resyncs = batch.len()
+            );
+            Ok(())
+        })();
+        self.end_deferred_dirty();
+        res
     }
 
     pub fn redo_logged(
@@ -5538,7 +6320,8 @@ where
         undo: &mut crate::engine::graph::editor::undo_engine::UndoEngine,
         log: &mut crate::engine::ChangeLog,
     ) -> Result<(), crate::engine::EditorError> {
-        let pending_events = undo.pending_redo_events();
+        self.ensure_not_poisoned()?;
+        let pending_events = undo.pending_redo_events_for_log(log);
         self.preflight_replay_admission(&pending_events, true)?;
         let invalidation_baseline = self.invalidation_baseline();
         self.invalidate_for_change_events(
@@ -5546,33 +6329,36 @@ where
             LoggedEditDirection::ForwardReplay,
             invalidation_baseline,
         );
-        let batch = undo.redo(&mut self.graph, log)?;
-        for item in &batch {
-            self.apply_forward_row_visibility_event(&item.event);
-            self.apply_forward_staged_formula_event(&item.event);
-        }
-        if !batch.is_empty() {
-            let events = batch
-                .iter()
-                .map(|item| item.event.clone())
-                .collect::<Vec<_>>();
-            self.clear_logged_cell_format_states(&events);
-        }
-        self.mirror_redo_batch_to_arrow(&batch);
-        if !batch.is_empty() {
+        self.begin_deferred_dirty();
+        let res = (|| {
+            let batch = undo.redo(&mut self.graph, log)?;
             for item in &batch {
-                self.record_change_for_event(&item.event);
+                self.apply_forward_row_visibility_event(&item.event);
+                self.apply_forward_staged_formula_event(&item.event);
             }
-        }
-        crate::engine::trace::fz_event!(
-            tracing::Level::INFO,
-            "history",
-            "history.replay",
-            op = "redo",
-            events_replayed = batch.len(),
-            ownership_resyncs = batch.len()
-        );
-        Ok(())
+            if !batch.is_empty() {
+                let events = batch
+                    .iter()
+                    .map(|item| item.event.clone())
+                    .collect::<Vec<_>>();
+                self.clear_logged_cell_format_states(&events);
+            }
+            self.mirror_redo_batch_to_arrow(&batch);
+            if !batch.is_empty() {
+                self.record_changes_for_events(batch.iter().map(|item| &item.event));
+            }
+            crate::engine::trace::fz_event!(
+                tracing::Level::INFO,
+                "history",
+                "history.replay",
+                op = "redo",
+                events_replayed = batch.len(),
+                ownership_resyncs = batch.len()
+            );
+            Ok(())
+        })();
+        self.end_deferred_dirty();
+        res
     }
 
     /// Undo the last committed atomic action using the journal stack.
@@ -5582,6 +6368,7 @@ where
         &mut self,
         undo: &mut crate::engine::graph::editor::undo_engine::UndoEngine,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let Some(journal) = undo.pop_undo_action() else {
             return Ok(());
         };
@@ -5596,14 +6383,18 @@ where
             LoggedEditDirection::InverseReplay,
             invalidation_baseline,
         );
-        journal.graph.undo(&mut self.graph)?;
-        self.apply_inverse_row_visibility_events(&journal.graph.events);
-        self.apply_arrow_undo_batch(&journal.arrow, /*undo=*/ true);
-        if !journal.graph.is_empty() || !journal.arrow.is_empty() {
-            for event in &journal.graph.events {
-                self.record_change_for_event(event);
+        self.begin_deferred_dirty();
+        let res = (|| {
+            journal.graph.undo(&mut self.graph)?;
+            self.apply_inverse_row_visibility_events(&journal.graph.events);
+            self.apply_arrow_undo_batch(&journal.arrow, /*undo=*/ true);
+            if !journal.graph.is_empty() || !journal.arrow.is_empty() {
+                self.record_inverse_changes_for_events(&journal.graph.events);
             }
-        }
+            Ok::<(), crate::engine::EditorError>(())
+        })();
+        self.end_deferred_dirty();
+        res?;
 
         #[cfg(feature = "tracing")]
         let events_replayed = journal.graph.events.len();
@@ -5626,6 +6417,7 @@ where
         &mut self,
         undo: &mut crate::engine::graph::editor::undo_engine::UndoEngine,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let Some(journal) = undo.pop_redo_action() else {
             return Ok(());
         };
@@ -5639,14 +6431,18 @@ where
             LoggedEditDirection::ForwardReplay,
             invalidation_baseline,
         );
-        journal.graph.redo(&mut self.graph)?;
-        self.apply_forward_row_visibility_events(&journal.graph.events);
-        self.apply_arrow_undo_batch(&journal.arrow, /*undo=*/ false);
-        if !journal.graph.is_empty() || !journal.arrow.is_empty() {
-            for event in &journal.graph.events {
-                self.record_change_for_event(event);
+        self.begin_deferred_dirty();
+        let res = (|| {
+            journal.graph.redo(&mut self.graph)?;
+            self.apply_forward_row_visibility_events(&journal.graph.events);
+            self.apply_arrow_undo_batch(&journal.arrow, /*undo=*/ false);
+            if !journal.graph.is_empty() || !journal.arrow.is_empty() {
+                self.record_changes_for_events(&journal.graph.events);
             }
-        }
+            Ok::<(), crate::engine::EditorError>(())
+        })();
+        self.end_deferred_dirty();
+        res?;
 
         #[cfg(feature = "tracing")]
         let events_replayed = journal.graph.events.len();
@@ -5779,45 +6575,65 @@ where
     ) {
         use formualizer_common::LiteralValue;
 
-        let mut i = 0usize;
-        for row in &snap.values {
-            for v in row {
-                if let Some(cell) = snap.target_cells.get(i) {
-                    let (sheet, r, c) = self.cellref_to_sheet_row_col(cell);
-                    let out = if clear_only {
-                        LiteralValue::Empty
-                    } else {
-                        v.clone()
-                    };
-                    self.mirror_value_to_computed_overlay(&sheet, r, c, &out);
-                }
-                i += 1;
-            }
+        let Some(first) = snap.target_cells.first() else {
+            return;
+        };
+        if !clear_only && self.config.arrow_storage_enabled && self.config.delta_overlay_enabled {
+            self.clear_delta_overlays_for_spill_restore(&snap.target_cells);
         }
-        // If target_cells is longer than values (should not happen), clear remaining cells.
-        if clear_only {
-            for cell in snap.target_cells.iter().skip(i) {
-                let (sheet, r, c) = self.cellref_to_sheet_row_col(cell);
-                self.mirror_value_to_computed_overlay(&sheet, r, c, &LiteralValue::Empty);
+        for cell in &snap.target_cells {
+            let r_off = cell.coord.row().saturating_sub(first.coord.row()) as usize;
+            let c_off = cell.coord.col().saturating_sub(first.coord.col()) as usize;
+            let Some(v) = snap.values.get(r_off).and_then(|row| row.get(c_off)) else {
+                continue;
+            };
+            let (sheet, r, c) = self.cellref_to_sheet_row_col(cell);
+            // Owned snapshot cells can live in compacted base lanes with no
+            // computed entry. They still need an Empty mask on clear; otherwise
+            // a repeated edit sees orphan values and blocks the next spill.
+            if clear_only && cell != first && self.read_cell_formula_ast(&sheet, r, c).is_some() {
+                continue;
             }
+            let out = if clear_only {
+                LiteralValue::Empty
+            } else {
+                v.clone()
+            };
+            self.mirror_value_to_computed_overlay(&sheet, r, c, &out);
         }
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_default_sheet_by_name(&mut self, name: &str) {
+        self.assert_not_poisoned();
         self.graph.set_default_sheet_by_name(name);
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_default_sheet_by_id(&mut self, id: SheetId) {
+        self.assert_not_poisoned();
         self.graph.set_default_sheet_by_id(id);
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_sheet_index_mode(&mut self, mode: crate::engine::SheetIndexMode) {
+        self.assert_not_poisoned();
         self.graph.set_sheet_index_mode(mode);
     }
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn mark_all_formulas_dirty_for_test(&mut self) {
+        self.assert_not_poisoned();
         self.mark_all_formula_vertices_dirty();
     }
 
@@ -5835,7 +6651,11 @@ where
 
     #[cfg(any(test, feature = "benchmark_internal"))]
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn reset_recalc_reuse_probe(&mut self) {
+        self.assert_not_poisoned();
         *self.recalc_reuse_probe.get_mut().unwrap() = RecalcReuseProbe::default();
     }
 
@@ -5959,6 +6779,7 @@ where
                 | ChangeEvent::VertexMoved { .. }
                 | ChangeEvent::FormulaAdjusted { .. }
                 | ChangeEvent::NamedRangeAdjusted { .. }
+                | ChangeEvent::TableResized { .. }
                 | ChangeEvent::EdgeAdded { .. }
                 | ChangeEvent::EdgeRemoved { .. }
                 | ChangeEvent::DefineName { .. }
@@ -6037,7 +6858,11 @@ where
 
     /// Mark data edited: bump snapshot and set edited flag.
     /// Value-only edits keep the stable-topology schedule cache alive.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn mark_data_edited(&mut self) {
+        self.assert_not_poisoned();
         self.lookup_index_cache.clear();
         self.snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -6045,7 +6870,11 @@ where
     }
 
     /// Mark a topology-changing edit: bump snapshot + topology epoch and invalidate cached schedules.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn mark_topology_edited(&mut self) {
+        self.assert_not_poisoned();
         self.arrow_sheet_index.take();
         self.lookup_index_cache.clear();
         self.snapshot_id
@@ -6094,7 +6923,11 @@ where
     }
 
     /// Access Arrow sheet store (mutable)
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn sheet_store_mut(&mut self) -> &mut SheetStore {
+        self.assert_not_poisoned();
         self.arrow_sheet_index.take();
         &mut self.arrow_sheets
     }
@@ -6108,7 +6941,11 @@ where
     }
 
     /// Stage a formula text instead of inserting into the graph (used when deferring is enabled).
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn stage_formula_text(&mut self, sheet: &str, row: u32, col: u32, text: String) {
+        self.assert_not_poisoned();
         self.staged_formulas
             .entry(sheet.to_string())
             .or_default()
@@ -6137,7 +6974,11 @@ where
     }
 
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn source_formula_ingress(&mut self) -> SourceFormulaIngress<'_, R> {
+        self.assert_not_poisoned();
         SourceFormulaIngress { engine: self }
     }
 
@@ -6146,10 +6987,14 @@ where
     /// integration tests in sibling crates can fail a commit at an exact point.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_before_prepared_span_commit_hook(
         &mut self,
         hook: impl FnOnce() + Send + Sync + 'static,
     ) {
+        self.assert_not_poisoned();
         self.before_prepared_span_commit_hook = Some(Box::new(hook));
     }
 
@@ -6205,7 +7050,11 @@ where
         }
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn clear_staged_formula_text(&mut self, sheet: &str, row: u32, col: u32) -> Option<String> {
+        self.assert_not_poisoned();
         let mut removed = None;
         let mut remove_sheet = false;
         let mut had_package = false;
@@ -6234,7 +7083,11 @@ where
         removed
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn clear_staged_formulas_for_sheet(&mut self, sheet: &str) {
+        self.assert_not_poisoned();
         if self.staged_formulas.remove(sheet).is_some() {
             self.staged_formula_index.clear_sheet(sheet);
             if let Some(sheet_id) = self.graph.sheet_id(sheet) {
@@ -6243,7 +7096,11 @@ where
         }
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn rename_staged_formula_sheet(&mut self, old: &str, new: &str) {
+        self.assert_not_poisoned();
         let Some(entries) = self.staged_formulas.remove(old) else {
             return;
         };
@@ -6271,11 +7128,19 @@ where
         &self.formula_parse_diagnostics
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn take_formula_parse_diagnostics(&mut self) -> Vec<FormulaParseDiagnostic> {
+        self.assert_not_poisoned();
         std::mem::take(&mut self.formula_parse_diagnostics)
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn clear_formula_parse_diagnostics(&mut self) {
+        self.assert_not_poisoned();
         self.formula_parse_diagnostics.clear();
     }
 
@@ -7470,6 +8335,7 @@ where
         &mut self,
         batches: Vec<FormulaIngestBatch>,
     ) -> Result<FormulaIngestReport, ExcelError> {
+        self.ensure_not_poisoned()?;
         let has_formulas = batches.iter().any(|batch| !batch.formulas.is_empty());
         let report = self.ingest_formula_batches_inner(
             batches,
@@ -7722,6 +8588,7 @@ where
         formula: &str,
         message: String,
     ) -> Result<Option<ASTNode>, ExcelError> {
+        self.ensure_not_poisoned()?;
         let policy = self.config.formula_parse_policy;
 
         if policy == FormulaParsePolicy::Strict {
@@ -8357,6 +9224,7 @@ where
         targets: &[crate::engine::EvaluationTarget],
         options: crate::engine::TargetEvalOptions<'_>,
     ) -> Result<crate::engine::PreparedTargetGraphReport, ExcelError> {
+        self.ensure_not_poisoned()?;
         let previous_budgets = self.evaluation_resource_budgets.clone();
         let diagnostics_len = self.formula_parse_diagnostics.len();
         let previous_report = self.last_formula_ingest_report.clone();
@@ -10120,6 +10988,7 @@ where
 
     /// Build graph for all staged formulas.
     pub fn build_graph_all(&mut self) -> Result<(), formualizer_parse::ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Full, |engine| {
             engine.build_graph_all_unobserved()
         })
@@ -10147,6 +11016,7 @@ where
         &mut self,
         sheets: I,
     ) -> Result<(), formualizer_parse::ExcelError> {
+        self.ensure_not_poisoned()?;
         let mut sheets = sheets.into_iter();
         self.observe_evaluation_resource_request(EvaluationRequestKind::Targeted, move |engine| {
             let name_scratch = (sheets.size_hint().0 as u64).saturating_mul(64);
@@ -10618,16 +11488,24 @@ where
     }
 
     /// Begin bulk Arrow ingest for base values (Phase A)
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn begin_bulk_ingest_arrow(
         &mut self,
     ) -> crate::engine::arrow_ingest::ArrowBulkIngestBuilder<'_, R> {
+        self.assert_not_poisoned();
         crate::engine::arrow_ingest::ArrowBulkIngestBuilder::new(self)
     }
 
     /// Begin bulk updates to Arrow store (Phase C)
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn begin_bulk_update_arrow(
         &mut self,
     ) -> crate::engine::arrow_ingest::ArrowBulkUpdateBuilder<'_, R> {
+        self.assert_not_poisoned();
         crate::engine::arrow_ingest::ArrowBulkUpdateBuilder::new(self)
     }
 
@@ -10852,6 +11730,7 @@ where
         hidden: bool,
         source: RowVisibilitySource,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         self.observe_function_semantic_epoch()
             .map_err(crate::engine::EditorError::Excel)?;
         self.observe_function_semantic_epoch()
@@ -10875,6 +11754,7 @@ where
         hidden: bool,
         source: RowVisibilitySource,
     ) -> Result<(), crate::engine::EditorError> {
+        self.ensure_not_poisoned()?;
         let sheet_id = self.ensure_known_sheet_id(sheet)?;
         let (start_row0, end_row0) =
             Self::normalize_row_range_1based(start_row_1based, end_row_1based)?;
@@ -11212,6 +12092,88 @@ where
         }
     }
 
+    /// Tear down projections in the old coordinate frame, before Arrow moves
+    /// either generated cells or user cells. Recalculation installs fresh extents.
+    fn clear_spills_before_structural_edit(
+        &mut self,
+        sheet: SheetId,
+        start: u32,
+        rows: bool,
+        capture: Option<&mut MutationCapture>,
+        undo: Option<&mut crate::engine::ArrowUndoBatch>,
+    ) -> Result<Vec<CellRef>, crate::engine::EditorError> {
+        let anchors = self.graph.spill_anchors_before_shift(sheet, start, rows);
+        if anchors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cells: Vec<_> = anchors
+            .iter()
+            .flat_map(|&anchor| self.graph.spill_cells_to_clear(anchor))
+            .collect();
+        self.begin_deferred_dirty();
+        let res = (|| {
+            if let Some(capture) = capture {
+                let start_len = capture.len();
+                self.edit_with_capture(capture, |editor| {
+                    for &anchor in &anchors {
+                        editor.clear_spill_region(anchor);
+                    }
+                })?;
+                if let Some(undo) = undo {
+                    self.record_spill_ops_into_arrow_undo(undo, &capture.events()[start_len..]);
+                }
+            } else {
+                for &anchor in &anchors {
+                    self.clear_spill_projection_and_mirror(anchor, None);
+                }
+            }
+            self.graph.mark_dirty_many(&anchors);
+            Ok(cells)
+        })();
+        self.end_deferred_dirty();
+        res
+    }
+
+    /// Empty overlays mask old outputs compacted into base storage. Structural
+    /// cache invalidation must not expose them as orphan literals.
+    fn restore_shifted_spill_tombstones(
+        &mut self,
+        cells: Vec<CellRef>,
+        start: u32,
+        count: u32,
+        rows: bool,
+        insert: bool,
+        mut undo: Option<&mut crate::engine::ArrowUndoBatch>,
+    ) {
+        for cell in cells {
+            let old = if rows {
+                cell.coord.row()
+            } else {
+                cell.coord.col()
+            };
+            let shifted = if old < start {
+                old
+            } else if insert {
+                old.saturating_add(count)
+            } else if old < start.saturating_add(count) {
+                continue;
+            } else {
+                old - count
+            };
+            let (row, col) = if rows {
+                (shifted, cell.coord.col())
+            } else {
+                (cell.coord.row(), shifted)
+            };
+            let sheet = self.graph.sheet_name(cell.sheet_id).to_string();
+            if let Some(undo) = undo.as_deref_mut() {
+                let old = self.read_computed_overlay_cell(&sheet, row + 1, col + 1);
+                undo.record_computed_cell(cell.sheet_id, row, col, old, Some(LiteralValue::Empty));
+            }
+            self.mirror_value_to_computed_overlay(&sheet, row + 1, col + 1, &LiteralValue::Empty);
+        }
+    }
+
     fn structural_column_occupancy(&self) -> crate::engine::graph::StructuralOccupancy {
         // Arrow exposes occupied columns through chunk metadata and overlay maps,
         // but has no cheap occupied-row index. Column edits therefore deliberately
@@ -11227,6 +12189,7 @@ where
         count: u32,
     ) -> Result<crate::engine::graph::editor::vertex_editor::ShiftSummary, crate::engine::EditorError>
     {
+        self.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::graph::editor::vertex_editor::ShiftSummary::default());
         }
@@ -11239,6 +12202,8 @@ where
         self.check_insert_room(sheet, before0, count, true)?;
         let affected_region = Self::structural_row_region(sheet_id, before0);
         let occupancy = self.structural_row_occupancy(sheet, sheet_id);
+        let cleared_spill_cells =
+            self.clear_spills_before_structural_edit(sheet_id, before0, true, None, None)?;
         let summary = {
             let mut editor =
                 VertexEditor::new(&mut self.graph).with_structural_occupancy(occupancy);
@@ -11251,6 +12216,14 @@ where
         self.purge_derived_formats_after_row(sheet_id, before0);
         self.mark_moved_formula_vertices_dirty(&summary);
         self.clear_computed_overlay_after_row(sheet, before0 as usize);
+        self.restore_shifted_spill_tombstones(
+            cleared_spill_cells,
+            before0,
+            count,
+            true,
+            true,
+            None,
+        );
         self.shift_row_visibility_insert(sheet_id, before0, count);
         self.record_structural_change(StructuralScope::Region(affected_region));
         self.mark_topology_edited();
@@ -11265,6 +12238,7 @@ where
         count: u32,
     ) -> Result<crate::engine::graph::editor::vertex_editor::ShiftSummary, crate::engine::EditorError>
     {
+        self.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::graph::editor::vertex_editor::ShiftSummary::default());
         }
@@ -11276,6 +12250,8 @@ where
         let start0 = start.saturating_sub(1);
         let affected_region = Self::structural_row_region(sheet_id, start0);
         let occupancy = self.structural_row_occupancy(sheet, sheet_id);
+        let cleared_spill_cells =
+            self.clear_spills_before_structural_edit(sheet_id, start0, true, None, None)?;
         let summary = {
             let mut editor =
                 VertexEditor::new(&mut self.graph).with_structural_occupancy(occupancy);
@@ -11288,6 +12264,14 @@ where
         self.purge_derived_formats_after_row(sheet_id, start0);
         self.mark_moved_formula_vertices_dirty(&summary);
         self.clear_computed_overlay_after_row(sheet, start0 as usize);
+        self.restore_shifted_spill_tombstones(
+            cleared_spill_cells,
+            start0,
+            count,
+            true,
+            false,
+            None,
+        );
         self.shift_row_visibility_delete(sheet_id, start0, count);
         self.record_structural_change(StructuralScope::Region(affected_region));
         self.mark_topology_edited();
@@ -11302,6 +12286,7 @@ where
         count: u32,
     ) -> Result<crate::engine::graph::editor::vertex_editor::ShiftSummary, crate::engine::EditorError>
     {
+        self.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::graph::editor::vertex_editor::ShiftSummary::default());
         }
@@ -11319,6 +12304,8 @@ where
         self.check_insert_room(sheet, before0, count, false)?;
         let affected_region = Self::structural_col_region(sheet_id, before0);
         let occupancy = self.structural_column_occupancy();
+        let cleared_spill_cells =
+            self.clear_spills_before_structural_edit(sheet_id, before0, false, None, None)?;
         let summary = {
             let mut editor =
                 VertexEditor::new(&mut self.graph).with_structural_occupancy(occupancy);
@@ -11331,6 +12318,14 @@ where
         self.purge_derived_formats_after_col(sheet_id, before0);
         self.mark_moved_formula_vertices_dirty(&summary);
         self.clear_computed_overlay_after_col(sheet, before0 as usize);
+        self.restore_shifted_spill_tombstones(
+            cleared_spill_cells,
+            before0,
+            count,
+            false,
+            true,
+            None,
+        );
         self.record_structural_change(StructuralScope::Region(affected_region));
         self.mark_topology_edited();
         Ok(summary)
@@ -11344,6 +12339,7 @@ where
         count: u32,
     ) -> Result<crate::engine::graph::editor::vertex_editor::ShiftSummary, crate::engine::EditorError>
     {
+        self.ensure_not_poisoned()?;
         if count == 0 {
             return Ok(crate::engine::graph::editor::vertex_editor::ShiftSummary::default());
         }
@@ -11360,6 +12356,8 @@ where
         let start0 = start.saturating_sub(1);
         let affected_region = Self::structural_col_region(sheet_id, start0);
         let occupancy = self.structural_column_occupancy();
+        let cleared_spill_cells =
+            self.clear_spills_before_structural_edit(sheet_id, start0, false, None, None)?;
         let summary = {
             let mut editor =
                 VertexEditor::new(&mut self.graph).with_structural_occupancy(occupancy);
@@ -11372,6 +12370,14 @@ where
         self.purge_derived_formats_after_col(sheet_id, start0);
         self.mark_moved_formula_vertices_dirty(&summary);
         self.clear_computed_overlay_after_col(sheet, start0 as usize);
+        self.restore_shifted_spill_tombstones(
+            cleared_spill_cells,
+            start0,
+            count,
+            false,
+            false,
+            None,
+        );
         self.record_structural_change(StructuralScope::Region(affected_region));
         self.mark_topology_edited();
         Ok(summary)
@@ -11587,7 +12593,7 @@ where
         end_row: u32,
     ) -> Option<(u32, u32)> {
         let a = self.sheet_store().sheet(sheet)?;
-        if a.columns.is_empty() {
+        if a.columns.is_empty() || a.chunk_starts.is_empty() {
             return None;
         }
         let sr0 = start_row.saturating_sub(1) as usize;
@@ -11595,26 +12601,31 @@ where
         if sr0 > er0 {
             return None;
         }
-        // Map start/end rows into chunk ranges
-        // We will scan each column for any non-empty within [sr0..=er0]
-        let mut min_c0: Option<usize> = None;
-        let mut max_c0: Option<usize> = None;
-        // Precompute chunk bounds for row range
-        for (ci, col) in a.columns.iter().enumerate() {
-            let mut any_in_range = false;
+        // Binary-search the chunk index range that can intersect [sr0..=er0].
+        let first_ci = a
+            .chunk_starts
+            .partition_point(|&s| s <= sr0)
+            .saturating_sub(1);
+        let end_ci = a.chunk_starts.partition_point(|&s| s <= er0);
+        if first_ci >= end_ci {
+            return None;
+        }
 
-            let scan_chunk = |chunk_idx: usize, chunk: &crate::arrow_store::ColumnChunk| -> bool {
+        let col_has_any = |col: &crate::arrow_store::ArrowColumn| -> bool {
+            for chunk_idx in first_ci..end_ci {
+                let Some(chunk) = col.chunk(chunk_idx) else {
+                    continue;
+                };
                 let Some(&chunk_start) = a.chunk_starts.get(chunk_idx) else {
-                    return false;
+                    continue;
                 };
                 let chunk_len = chunk.type_tag.len();
                 if chunk_len == 0 {
-                    return false;
+                    continue;
                 }
                 let chunk_end = chunk_start + chunk_len.saturating_sub(1);
-                // check intersection
                 if sr0 > chunk_end || er0 < chunk_start {
-                    return false;
+                    continue;
                 }
                 let start_off = sr0.max(chunk_start) - chunk_start;
                 let end_off = er0.min(chunk_end) - chunk_start;
@@ -11634,34 +12645,17 @@ where
                         return true;
                     }
                 }
-                false
-            };
-
-            for (chunk_idx, chunk) in col.chunks.iter().enumerate() {
-                if scan_chunk(chunk_idx, chunk) {
-                    any_in_range = true;
-                    break;
-                }
             }
+            false
+        };
 
-            if !any_in_range && !col.sparse_chunks.is_empty() {
-                for (&chunk_idx, chunk) in col.sparse_chunks.iter() {
-                    if scan_chunk(chunk_idx, chunk) {
-                        any_in_range = true;
-                        break;
-                    }
-                }
-            }
-
-            if any_in_range {
-                min_c0 = Some(min_c0.map(|m| m.min(ci)).unwrap_or(ci));
-                max_c0 = Some(max_c0.map(|m| m.max(ci)).unwrap_or(ci));
-            }
-        }
-        match (min_c0, max_c0) {
-            (Some(a0), Some(b0)) => Some(((a0 as u32) + 1, (b0 as u32) + 1)),
-            _ => None,
-        }
+        // Scan inward from both ends so dense wide sheets touch only 2 columns.
+        let min_c0 = (0..a.columns.len()).find(|&ci| col_has_any(&a.columns[ci]))?;
+        let max_c0 = (min_c0..a.columns.len())
+            .rev()
+            .find(|&ci| col_has_any(&a.columns[ci]))
+            .unwrap_or(min_c0);
+        Some(((min_c0 as u32) + 1, (max_c0 as u32) + 1))
     }
 
     fn formula_row_bounds_for_columns(
@@ -11869,6 +12863,149 @@ where
         };
         if let Some(ch) = asheet.columns[col0].chunk_mut(ch_idx) {
             let _ = ch.overlay.remove(in_off);
+        }
+    }
+
+    /// Clear an explicit `Empty` delta-overlay tombstone for a cell about to
+    /// receive a spilled computed value without resurrecting a deleted base
+    /// Arrow value if the computed overlay is later cleared (e.g. `remove_sheet`
+    /// or post-shrink `insert_rows`).
+    ///
+    /// - Leaves non-empty user values in the delta overlay untouched.
+    /// - If the base lane is already `Empty`, removes the redundant overlay
+    ///   entry in O(1).
+    /// - If the base lane is non-empty, compacts the chunk's delta overlay into
+    ///   base storage so the `Empty` deletion persists in base Arrow.
+    fn clear_empty_delta_overlay_cell(&mut self, sheet: &str, row: u32, col: u32) {
+        if !(self.config.arrow_storage_enabled && self.config.delta_overlay_enabled) {
+            return;
+        }
+        let Some(asheet) = self.arrow_sheets.sheet_mut(sheet) else {
+            return;
+        };
+        let row0 = row.saturating_sub(1) as usize;
+        let col0 = col.saturating_sub(1) as usize;
+        if row0 >= asheet.nrows as usize || col0 >= asheet.columns.len() {
+            return;
+        }
+        let Some((ch_idx, in_off)) = asheet.chunk_of_row(row0) else {
+            return;
+        };
+        let needs_compact = {
+            let Some(ch) = asheet.columns[col0].chunk_mut(ch_idx) else {
+                return;
+            };
+            let Some(ov) = ch.overlay.get_scalar(in_off) else {
+                return;
+            };
+            if ov.type_tag() != crate::arrow_store::TypeTag::Empty {
+                return;
+            }
+            if crate::arrow_store::TypeTag::from_u8(ch.type_tag.value(in_off))
+                == crate::arrow_store::TypeTag::Empty
+            {
+                let _ = ch.overlay.remove(in_off);
+                false
+            } else {
+                true
+            }
+        };
+        if needs_compact {
+            let freed = asheet.maybe_compact_chunk(col0, ch_idx, 0, usize::MAX);
+            if freed > 0 {
+                self.overlay_compactions = self.overlay_compactions.saturating_add(1);
+            }
+        }
+    }
+
+    /// Clear delta-overlay entries for spill-owned cells being restored from a
+    /// `SpillSnapshot` (undo/redo), compacting any chunks where a restored cell
+    /// still has a non-empty base lane so subsequent computed-overlay clears
+    /// cannot resurrect stale base values.
+    fn clear_delta_overlays_for_spill_restore(&mut self, cells: &[CellRef]) {
+        let mut to_compact: rustc_hash::FxHashSet<(SheetId, usize, usize)> =
+            rustc_hash::FxHashSet::default();
+        for cell in cells {
+            let sheet_name = self.graph.sheet_name(cell.sheet_id).to_string();
+            let Some(asheet) = self.arrow_sheets.sheet_mut(&sheet_name) else {
+                continue;
+            };
+            let row0 = cell.coord.row() as usize;
+            let col0 = cell.coord.col() as usize;
+            if row0 >= asheet.nrows as usize || col0 >= asheet.columns.len() {
+                continue;
+            }
+            let Some((ch_idx, in_off)) = asheet.chunk_of_row(row0) else {
+                continue;
+            };
+            let Some(ch) = asheet.columns[col0].chunk_mut(ch_idx) else {
+                continue;
+            };
+            if crate::arrow_store::TypeTag::from_u8(ch.type_tag.value(in_off))
+                == crate::arrow_store::TypeTag::Empty
+            {
+                let _ = ch.overlay.remove(in_off);
+            } else {
+                let _ = ch
+                    .overlay
+                    .set(in_off, crate::arrow_store::OverlayValue::Empty);
+                ch.overlay.set_format(in_off, None);
+                to_compact.insert((cell.sheet_id, col0, ch_idx));
+            }
+        }
+        for (sheet_id, col0, ch_idx) in to_compact {
+            let sheet_name = self.graph.sheet_name(sheet_id).to_string();
+            if let Some(asheet) = self.arrow_sheets.sheet_mut(&sheet_name) {
+                let freed = asheet.maybe_compact_chunk(col0, ch_idx, 0, usize::MAX);
+                if freed > 0 {
+                    self.overlay_compactions = self.overlay_compactions.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Structural invalidation also removes caches of foreign formulas. Keep
+    /// those removals in the operation's coordinate frame for exact rollback.
+    fn journal_structural_computed_clear(
+        &self,
+        sheet: &str,
+        start: usize,
+        rows: bool,
+        undo: &mut crate::engine::ArrowUndoBatch,
+    ) {
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return;
+        };
+        let Some(asheet) = self.arrow_sheets.sheet(sheet) else {
+            return;
+        };
+        for (col, column) in asheet.columns.iter().enumerate() {
+            if !rows && col < start {
+                continue;
+            }
+            for (chunk, data) in column.chunks.iter().enumerate().chain(
+                column
+                    .sparse_chunks
+                    .iter()
+                    .map(|(chunk, data)| (*chunk, data)),
+            ) {
+                let Some(&row0) = asheet.chunk_starts.get(chunk) else {
+                    continue;
+                };
+                for (off, value) in data.computed_overlay.iter() {
+                    let row = row0.saturating_add(off);
+                    if rows && row < start {
+                        continue;
+                    }
+                    undo.record_computed_cell(
+                        sheet_id,
+                        row as u32,
+                        col as u32,
+                        Some(value.to_literal_for(asheet.date_system)),
+                        None,
+                    );
+                }
+            }
         }
     }
 
@@ -12132,7 +13269,25 @@ where
                     new,
                 } => {
                     let sheet = self.graph.sheet_name(*sheet_id).to_string();
-                    let v = if undo { old.clone() } else { new.clone() };
+                    // Graph undo has already restored projection ownership.
+                    // A prior write in the same action may have cleared the
+                    // spill before this cell's old delta was captured. Such
+                    // deltas (including Empty) must not mask its snapshot.
+                    let restored_projection = undo
+                        && self
+                            .graph
+                            .spill_registry_anchor_for_cell(CellRef::new(
+                                *sheet_id,
+                                Coord::new(*row0, *col0, true, true),
+                            ))
+                            .is_some();
+                    let v = if restored_projection {
+                        None
+                    } else if undo {
+                        old.clone()
+                    } else {
+                        new.clone()
+                    };
                     self.set_delta_overlay_cell_raw(&sheet, row0 + 1, col0 + 1, v);
                 }
                 ArrowOp::SetComputedCell {
@@ -12261,6 +13416,29 @@ where
                     }
                 }
                 ChangeEvent::SpillCleared { old, .. } => {
+                    let width = old.values.first().map_or(0, Vec::len);
+                    if old.target_cells.len() != old.values.len().saturating_mul(width) {
+                        if let Some(first) = old.target_cells.first() {
+                            for cell in &old.target_cells {
+                                let r = (cell.coord.row() - first.coord.row()) as usize;
+                                let c = (cell.coord.col() - first.coord.col()) as usize;
+                                let value = old
+                                    .values
+                                    .get(r)
+                                    .and_then(|row| row.get(c))
+                                    .cloned()
+                                    .unwrap_or(LiteralValue::Empty);
+                                undo.record_computed_cell(
+                                    cell.sheet_id,
+                                    cell.coord.row(),
+                                    cell.coord.col(),
+                                    Some(value),
+                                    Some(LiteralValue::Empty),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if let Some((sid, sr0, sc0, er0, ec0, old_vals)) = rect_from_snapshot(old) {
                         let new_vals =
                             vec![vec![LiteralValue::Empty; old_vals[0].len()]; old_vals.len()];
@@ -12885,8 +14063,30 @@ where
         self.resource_checkpoint(0)?;
         let commit_started = self.preflight_evaluation_commit_window(buffer.len())?;
         let (writes, formats_present) = buffer.take_writes();
+        let mut claims = std::mem::take(&mut buffer.read_claims);
         let plan = self.plan_owned_computed_write_coalescing(writes, formats_present);
+        if !claims.is_empty() {
+            for chunk in &plan.chunks {
+                for entry in &chunk.entries {
+                    let key = (
+                        chunk.sheet_id,
+                        chunk
+                            .chunk_start_row0
+                            .saturating_add(entry.row_in_chunk as u32),
+                        chunk.col0,
+                    );
+                    if let Some(claim) = claims.get_mut(&key) {
+                        claim.winning = claim.seq == entry.seq;
+                    }
+                }
+            }
+        }
         self.flush_computed_write_plan(plan);
+        for claim in claims.into_values() {
+            if claim.winning {
+                self.freshness_record_installed(&claim.result, true);
+            }
+        }
         self.observe_evaluation_commit_window(commit_started);
 
         Ok(())
@@ -13240,30 +14440,30 @@ where
         vertex_id: VertexId,
         value: &LiteralValue,
         computed_writes: Option<&mut ComputedWriteBuffer>,
-    ) -> Result<(), ExcelError> {
+    ) -> Result<OverlayWriteDisposition, ExcelError> {
         if !(self.config.arrow_storage_enabled
             && self.config.delta_overlay_enabled
             && self.config.write_formula_overlay_enabled)
         {
-            return Ok(());
+            return Ok(OverlayWriteDisposition::Skipped);
         }
         if self.computed_overlay_mirroring_disabled {
-            return Ok(());
+            return Ok(OverlayWriteDisposition::Skipped);
         }
         if !matches!(
             self.graph.get_vertex_kind(vertex_id),
             VertexKind::FormulaScalar | VertexKind::FormulaArray
         ) {
-            return Ok(());
+            return Ok(OverlayWriteDisposition::Skipped);
         }
         let Some(cell) = self.graph.get_cell_ref(vertex_id) else {
-            return Ok(());
+            return Ok(OverlayWriteDisposition::Skipped);
         };
         let Some(buffer) = computed_writes else {
             // Unbuffered: one sheet lookup for the value and its format.
             let format_id = self.derived_formats.get(&cell);
             self.write_computed_cell_0based(cell, value, format_id);
-            return Ok(());
+            return Ok(OverlayWriteDisposition::Installed);
         };
         let date_system = self
             .arrow_sheet_by_id(cell.sheet_id)
@@ -13281,9 +14481,10 @@ where
             );
             if self.should_flush_computed_write_buffer(buffer) {
                 self.flush_computed_write_buffer(buffer)?;
+                return Ok(OverlayWriteDisposition::Installed);
             }
         }
-        Ok(())
+        Ok(OverlayWriteDisposition::Buffered)
     }
 
     #[inline]
@@ -13363,6 +14564,7 @@ where
         col: u32,
         value: LiteralValue,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_function_semantic_epoch()?;
         let sheet_existed = self.graph.sheet_id(sheet).is_some();
         let sheet_id = self.graph.sheet_id_mut(sheet);
@@ -13386,6 +14588,12 @@ where
             self.clear_spill_projection_and_mirror(anchor, None);
         }
         self.graph.set_cell_value(sheet, row, col, value.clone())?;
+        if value != LiteralValue::Empty {
+            for table in self.graph.empty_tables_at(cell_ref) {
+                self.graph.resize_table(&table.name, table.range)?;
+                self.mark_topology_edited();
+            }
+        }
         self.clear_cell_format_state(sheet, cell_ref);
         self.record_changed_cell(sheet, row, col);
         if !sheet_existed || replaced_formula {
@@ -13408,6 +14616,39 @@ where
         });
     }
 
+    fn record_changes_for_events<'a>(&mut self, events: impl IntoIterator<Item = &'a ChangeEvent>) {
+        self.begin_deferred_dirty();
+        for event in events {
+            self.record_change_for_event(event);
+        }
+        self.end_deferred_dirty();
+    }
+
+    fn record_inverse_changes_for_events<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = &'a ChangeEvent>,
+    ) {
+        self.begin_deferred_dirty();
+        for event in events {
+            self.record_inverse_change_for_event(event);
+        }
+        self.end_deferred_dirty();
+    }
+
+    fn record_inverse_change_for_event(&mut self, event: &ChangeEvent) {
+        if let ChangeEvent::SetValue { addr, .. } | ChangeEvent::SetFormula { addr, .. } = event {
+            // Replay already restored any spill snapshot's ownership. This
+            // notification is not a new literal write into that projection.
+            self.record_structural_change(StructuralScope::Region(Region::point(
+                addr.sheet_id,
+                addr.coord.row(),
+                addr.coord.col(),
+            )));
+        } else {
+            self.record_change_for_event(event);
+        }
+    }
+
     fn record_change_for_event(&mut self, event: &ChangeEvent) {
         match event {
             ChangeEvent::SetValue { addr, .. } | ChangeEvent::SetFormula { addr, .. } => {
@@ -13422,12 +14663,16 @@ where
                     self.record_structural_change(scope);
                 }
             }
-            ChangeEvent::SpillCleared { old, .. } => {
+            ChangeEvent::SpillCleared { anchor, old } => {
+                if self.graph.is_live_formula_vertex(*anchor) {
+                    self.graph.mark_dirty_many(&[*anchor]);
+                }
                 if let Some(scope) = Self::structural_scope_from_cells(&old.target_cells) {
                     self.record_structural_change(scope);
                 }
             }
-            ChangeEvent::DefineName { .. }
+            ChangeEvent::TableResized { .. }
+            | ChangeEvent::DefineName { .. }
             | ChangeEvent::UpdateName { .. }
             | ChangeEvent::DeleteName { .. }
             | ChangeEvent::NamedRangeAdjusted { .. } => {
@@ -13436,9 +14681,13 @@ where
                 // NamedRangeAdjusted event. Epoch changes only rebuild caches.
                 self.record_structural_change(StructuralScope::AllSheets);
             }
-            ChangeEvent::VertexMoved { .. } | ChangeEvent::FormulaAdjusted { .. } => {
-                // Structural entry points publish their axis delta once after
-                // the graph and Arrow commits.
+            ChangeEvent::VertexMoved { id, .. } | ChangeEvent::FormulaAdjusted { id, .. } => {
+                // Structural replay restores cached values in the old frame;
+                // moved foreign formulas must recompute there as well as spill
+                // anchors. The forward structural entry point also dirties them.
+                if self.graph.is_live_formula_vertex(*id) {
+                    self.graph.mark_dirty_many(&[*id]);
+                }
             }
             ChangeEvent::SetRowVisibility { sheet_id, row0, .. } => {
                 self.record_structural_change(StructuralScope::Region(Region::whole_row(
@@ -13457,7 +14706,7 @@ where
 
     fn record_structural_change(&mut self, scope: StructuralScope) {
         if let StructuralScope::Cell { sheet, row, col } = scope {
-            self.wake_spill_owner_of_entered_formula(sheet, row, col);
+            self.wake_spill_owner_of_entered_cell(sheet, row, col);
         }
         self.wake_spill_blocker_waiters(scope);
         self.invalidate_pending_spills(scope);
@@ -13486,14 +14735,11 @@ where
         }
     }
 
-    /// A formula entered into a live spill blocks it: wake the owning anchor
-    /// so its next recalc re-plans (and reports `#SPILL!`). The spill keeps
-    /// its registry until then; clearing it leaves the formula cell alone.
-    fn wake_spill_owner_of_entered_formula(&mut self, sheet: SheetId, row: u32, col: u32) {
+    /// A user edit into a live spill wakes its anchor. Literal writes release
+    /// projection ownership before any later shrink or clear.
+    fn wake_spill_owner_of_entered_cell(&mut self, sheet: SheetId, row: u32, col: u32) {
         let cell = self.graph.make_cell_ref_internal(sheet, row, col);
-        if let Some(owner) = self.graph.spill_registry_anchor_for_cell(cell)
-            && self.graph.is_foreign_formula_cell(&cell, owner)
-        {
+        if let Some(owner) = self.graph.note_spill_child_edit(cell) {
             self.graph.mark_dirty_many(&[owner]);
         }
     }
@@ -13525,6 +14771,7 @@ where
         current_sheet: &str,
         value: LiteralValue,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let owned = cell.into_owned();
         let sheet_id = self.resolve_sheet_locator_for_write(owned.sheet, current_sheet)?;
         let sheet_name = self.graph.sheet_name(sheet_id).to_string();
@@ -13542,6 +14789,7 @@ where
         current_sheet: &str,
         ast: ASTNode,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let owned = cell.into_owned();
         let sheet_id = self.resolve_sheet_locator_for_write(owned.sheet, current_sheet)?;
         let sheet_name = self.graph.sheet_name(sheet_id).to_string();
@@ -13611,6 +14859,7 @@ where
         col: u32,
         ast: ASTNode,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_function_semantic_epoch()?;
         let sheet_id = self.graph.sheet_id_mut(sheet);
         let placement = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
@@ -13627,6 +14876,9 @@ where
             ingested.dep_plan.volatile,
             ingested.dep_plan.dynamic,
         )?;
+        for table in self.graph.empty_tables_at(placement) {
+            self.graph.resize_table(&table.name, table.range)?;
+        }
         self.clear_cell_format_state(sheet, placement);
         self.record_changed_cell(sheet, row, col);
 
@@ -13646,6 +14898,7 @@ where
     where
         I: IntoIterator<Item = (u32, u32, ASTNode)>,
     {
+        self.ensure_not_poisoned()?;
         let collected: Vec<(u32, u32, ASTNode)> = items.into_iter().collect();
         let edited_cells: Vec<(u32, u32)> = collected.iter().map(|(r, c, _)| (*r, *c)).collect();
         let sheet_id = self.graph.sheet_id_mut(sheet);
@@ -13669,11 +14922,20 @@ where
             })
             .collect();
         let n = self.graph.bulk_set_formulas_with_plans(sheet, planned)?;
-        for (row, col) in edited_cells {
-            let cell = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
-            self.clear_cell_format_state(sheet, cell);
-            self.record_changed_cell(sheet, row, col);
-        }
+        self.begin_deferred_dirty();
+        let post_res = (|| {
+            for (row, col) in edited_cells {
+                let cell = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+                for table in self.graph.empty_tables_at(cell) {
+                    self.graph.resize_table(&table.name, table.range)?;
+                }
+                self.clear_cell_format_state(sheet, cell);
+                self.record_changed_cell(sheet, row, col);
+            }
+            Ok::<_, ExcelError>(())
+        })();
+        self.end_deferred_dirty();
+        post_res?;
         // Single topology bump after batch
         if n > 0 {
             self.mark_topology_edited();
@@ -13715,6 +14977,7 @@ where
         row: u32,
         col: u32,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         let not_a_formula = || {
             ExcelError::new(ExcelErrorKind::Ref)
                 .with_message("Declared dynamic array anchor must be a formula cell")
@@ -13754,6 +15017,7 @@ where
         rows: u32,
         cols: u32,
     ) -> Result<(), ExcelError> {
+        self.ensure_not_poisoned()?;
         if self.config.family_execution {
             return Err(ExcelError::new(ExcelErrorKind::Ref)
                 .with_message("Fixed arrays require family_execution = false"));
@@ -14049,12 +15313,20 @@ where
     }
 
     /// Begin batch operations - defer CSR rebuilds for better performance
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn begin_batch(&mut self) {
+        self.assert_not_poisoned();
         self.graph.begin_batch();
     }
 
     /// End batch operations and trigger CSR rebuild
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn end_batch(&mut self) {
+        self.assert_not_poisoned();
         self.graph.end_batch();
     }
 
@@ -14066,13 +15338,21 @@ where
     ///
     /// Callers MUST run `end_deferred_dirty` on every exit path, including
     /// error returns; evaluation entry points `debug_assert` no scope leaked.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn begin_deferred_dirty(&mut self) {
+        self.assert_not_poisoned();
         self.graph.begin_deferred_dirty();
     }
 
     /// End a deferred-dirty scope, flushing the queued propagation when the
     /// outermost scope closes. See `Engine::begin_deferred_dirty`.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn end_deferred_dirty(&mut self) {
+        self.assert_not_poisoned();
         let _ = self.graph.end_deferred_dirty();
     }
 
@@ -14098,6 +15378,7 @@ where
     }
 
     pub fn evaluate_vertex(&mut self, vertex_id: VertexId) -> Result<LiteralValue, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Vertex, |engine| {
             engine.observe_function_semantic_epoch()?;
             // A direct request selects exactly one vertex, regardless of its formula kind.
@@ -14546,6 +15827,7 @@ where
                             }
                         }
                         self.graph.clear_spill_region(vertex_id);
+                        self.freshness_note_spill_change(&spill_cells, &[]);
                         if let Some(scope) = Self::structural_scope_from_cells(&spill_cells) {
                             self.record_structural_change(scope);
                         }
@@ -14628,6 +15910,7 @@ where
                     }
                 }
                 self.graph.clear_spill_region(vertex_id);
+                self.freshness_note_spill_change(&spill_cells, &[]);
                 if let Some(scope) = Self::structural_scope_from_cells(&spill_cells) {
                     self.record_structural_change(scope);
                 }
@@ -14708,6 +15991,10 @@ where
                 Ok(out)
             }
             NamedDefinition::Formula { ast, .. } => {
+                let _origin = self
+                    .operation_diagnostic_collector
+                    .as_ref()
+                    .map(|c| c.named_scope(vertex_id));
                 let context_sheet = match named_range.scope {
                     NameScope::Sheet(id) => id,
                     NameScope::Workbook => sheet_id,
@@ -14809,6 +16096,10 @@ where
             }
             NamedDefinition::Literal(v) => LiteralValue::Array(vec![vec![v.clone()]]),
             NamedDefinition::Formula { ast, .. } => {
+                let _origin = self
+                    .operation_diagnostic_collector
+                    .as_ref()
+                    .map(|c| c.named_scope(vertex_id));
                 let context_sheet = match named_range.scope {
                     NameScope::Sheet(id) => id,
                     NameScope::Workbook => sheet_id,
@@ -14992,6 +16283,7 @@ where
         &mut self,
         targets: &[crate::engine::EvaluationTarget],
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Targeted, |engine| {
             engine.observe_function_semantic_epoch()?;
             engine.validate_deterministic_mode()?;
@@ -15005,6 +16297,7 @@ where
         targets: &[crate::engine::EvaluationTarget],
         options: crate::engine::TargetEvalOptions<'_>,
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Targeted, |engine| {
             engine.active_cancel_flag = options.cancel.clone();
             engine.active_evaluation_deadline = options.deadline;
@@ -15026,6 +16319,7 @@ where
         &mut self,
         targets: &[crate::engine::EvaluationTarget],
     ) -> Result<(EvalResult, crate::engine::TargetEvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::CellsWithDelta, |engine| {
             engine.observe_function_semantic_epoch()?;
             engine.validate_deterministic_mode()?;
@@ -15040,6 +16334,7 @@ where
         &mut self,
         targets: &[(&str, u32, u32)],
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Targeted, |engine| {
             engine.evaluate_until_unobserved(targets)
         })
@@ -15170,6 +16465,7 @@ where
 
     /// Build a revision-bound compatibility plan covering every prepared formula vertex.
     pub fn build_recalc_plan(&self) -> Result<RecalcPlan, ExcelError> {
+        self.ensure_not_poisoned()?;
         if self.has_staged_formulas() || self.staged_formula_index.has_packages() {
             return Err(
                 Self::plan_stale(formualizer_common::PlanStaleReason::Staged).with_message(
@@ -15205,6 +16501,7 @@ where
         &mut self,
         targets: &[crate::engine::EvaluationTarget],
     ) -> Result<RecalcPlan, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.build_recalc_plan_for_targets_with_options(
             targets,
             crate::engine::TargetEvalOptions::default(),
@@ -15216,6 +16513,7 @@ where
         targets: &[crate::engine::EvaluationTarget],
         options: crate::engine::TargetEvalOptions<'_>,
     ) -> Result<RecalcPlan, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::RecalcPlan, |engine| {
             engine.observe_function_semantic_epoch()?;
             engine.validate_deterministic_mode()?;
@@ -15245,6 +16543,7 @@ where
 
     /// Evaluate using a previously constructed compatibility or target plan.
     pub fn evaluate_recalc_plan(&mut self, plan: &RecalcPlan) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::RecalcPlan, |engine| {
             engine.evaluate_recalc_plan_unobserved(plan)
         })
@@ -15256,6 +16555,7 @@ where
         cancel: Option<crate::engine::CancelToken>,
         deadline: Option<Instant>,
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::RecalcPlan, |engine| {
             engine.active_cancel_flag = cancel.clone();
             engine.active_evaluation_deadline = deadline;
@@ -15397,7 +16697,12 @@ where
         ExcelError::new(kind).with_message(format!("unified_authority: {error:?}"))
     }
 
-    /// Evaluate all dirty/volatile vertices
+    /// Iterative members whose next-request invalidation was deferred by a
+    /// completed snapshot. This does not establish source-cache seed provenance.
+    pub fn pending_snapshot_iterative_members(&self) -> usize {
+        self.snapshot_iterative_redirty_pending.len()
+    }
+
     /// Evaluate a current result snapshot, optionally with cancellation.
     ///
     /// This evaluates exactly like [`Self::evaluate_all`] (or its cancellable
@@ -15408,12 +16713,19 @@ where
     /// Callers retaining the engine must start another evaluation request
     /// (`evaluate_all`, `evaluate_until`, `evaluate_cell`, or equivalent) to
     /// refresh volatile values. That request restores the deferred volatile
-    /// redirty before selecting its work. Errors and cancellation never leave
-    /// the snapshot mode active.
+    /// redirty before selecting its work. Iterative SCC invalidation is deferred
+    /// on the same boundary, preserving completed snapshot values as Current.
+    /// Errors and cancellation never leave the snapshot mode active.
     pub fn evaluate_all_for_snapshot(
         &mut self,
         cancel: Option<crate::engine::CancelToken>,
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
+        // Refusal must precede the scope and its failure cleanup: redirtying
+        // volatiles here would invalidate values installed by the active job.
+        if self.has_active_recalc_job() {
+            return Err(Self::active_recalc_job_error());
+        }
         /// Leaves snapshot mode even when evaluation unwinds. A panic
         /// keeps the deferred volatile redirty pending, so the next request
         /// restores volatile work without touching the graph mid-unwind.
@@ -15441,8 +16753,121 @@ where
         result
     }
 
+    /// Evaluate until a soft boundary, preserving installed work for a later call.
+    /// A family run or cycle may overrun the budget. Cancellation keeps its
+    /// existing post-work boundary: the observing unit is not completed.
+    ///
+    /// Results are independent of call boundaries, except for iterative cycles
+    /// created by edits during a pending recalculation. Such new cycles start
+    /// from the cells' current values when they form, including values installed
+    /// by earlier calls; they need not match a fresh, uninterrupted calculation.
+    /// SCCs already present at the start retain their original recalc seeds.
+    ///
+    /// Function providers without a semantic revision (`planning_semantic_revision`
+    /// returns `None`) are assumed stable for the duration of a logical
+    /// recalculation. Hosts changing provider behaviour must bump its semantic
+    /// revision or mark the affected cells dirty.
+    ///
+    /// Load-time mutation APIs, including `ArrowBulkIngestBuilder::finish` and
+    /// raw `sheet_store_mut` access, are unsupported while a resumable
+    /// recalculation is pending; they do not publish mutation revisions.
+    pub fn evaluate_all_until(
+        &mut self,
+        stop: super::EvaluationStop,
+    ) -> Result<super::EvaluationProgress, ExcelError> {
+        self.ensure_not_poisoned()?;
+        if self.has_active_recalc_job() {
+            return Err(Self::active_recalc_job_error());
+        }
+        let report = self.drive_recalc_step(stop)?;
+        Ok(match report.result {
+            Some(result) => super::EvaluationProgress::Complete(result),
+            None => super::EvaluationProgress::Incomplete(super::IncompleteEvaluation {
+                reason: if report.phase == super::StepPhase::Cancelled {
+                    super::StopReason::Cancelled
+                } else {
+                    super::StopReason::Deadline
+                },
+                computed_vertices: report.step_computed_vertices,
+            }),
+        })
+    }
+
+    /// Whether a logical recalculation is awaiting another resumable call.
+    pub fn has_pending_resumable_evaluation(&self) -> bool {
+        self.resumable.is_some()
+    }
+
+    /// Capture original values before a return or an acyclic installation can
+    /// overwrite a member. Match the SCC task's overlay-first snapshot and its
+    /// persistence repair for overlays cleared by structural edits.
+    fn capture_original_cycle_seeds(
+        &self,
+        cycle: &[VertexId],
+    ) -> FxHashMap<VertexId, LiteralValue> {
+        cycle
+            .iter()
+            .map(|&vertex| {
+                let value = if let Some(cell) = self.graph.get_cell_ref(vertex) {
+                    let current = self
+                        .read_cell_value(
+                            self.graph.sheet_name(cell.sheet_id),
+                            cell.coord.row() + 1,
+                            cell.coord.col() + 1,
+                        )
+                        .unwrap_or(LiteralValue::Empty);
+                    if matches!(current, LiteralValue::Empty) {
+                        self.iterative_state_values
+                            .get(&vertex)
+                            .cloned()
+                            .unwrap_or(current)
+                    } else {
+                        current
+                    }
+                } else {
+                    self.graph.get_value(vertex).unwrap_or(LiteralValue::Empty)
+                };
+                (vertex, value)
+            })
+            .collect()
+    }
+
+    fn record_original_cycle_seeds(&mut self, schedule: &super::scheduler::Schedule) {
+        if self.resumable.as_ref().unwrap().original_cycles_recorded {
+            return;
+        }
+        for cycle in &schedule.cycles {
+            let mut key = cycle.clone();
+            key.sort_unstable();
+            let seeds = self.capture_original_cycle_seeds(&key);
+            let state = self.resumable.as_mut().unwrap();
+            state.original_cycles.insert(key.clone());
+            // Retained SCCs were captured already at logical admission.
+            state.cycle_seeds.entry(key).or_insert(seeds);
+        }
+        let state = self.resumable.as_mut().unwrap();
+        state.original_cycles_recorded = true;
+        state.refresh_seed_retained_bytes();
+    }
+
+    fn resumable_should_stop(
+        &self,
+        units: usize,
+        stop_at: Option<crate::instant::FzInstant>,
+    ) -> bool {
+        #[cfg(test)]
+        if self
+            .resumable_stop_after_units_for_test
+            .is_some_and(|n| units >= n.max(1))
+        {
+            return true;
+        }
+        units > 0 && stop_at.is_some_and(|t| crate::instant::FzInstant::now() >= t)
+    }
+
     /// Evaluate all dirty/volatile vertices.
     pub fn evaluate_all(&mut self) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         // `evaluate_all_unobserved` owns the `observe_function_semantic_epoch` guard.
         self.observe_evaluation_resource_request(EvaluationRequestKind::Full, |engine| {
             engine.evaluate_all_unobserved()
@@ -15597,6 +17022,7 @@ where
     pub fn evaluate_all_with_target_delta(
         &mut self,
     ) -> Result<(EvalResult, crate::engine::TargetEvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::FullWithDelta, |engine| {
             engine.observe_function_semantic_epoch()?;
             let mut collector = DeltaCollector::new(DeltaMode::Cells);
@@ -15606,6 +17032,7 @@ where
     }
 
     pub fn evaluate_all_with_delta(&mut self) -> Result<(EvalResult, EvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.evaluate_all_with_delta_policy(EvalDeltaCompatibilityPolicy::Unlimited)
     }
 
@@ -15613,6 +17040,7 @@ where
         &mut self,
         policy: EvalDeltaCompatibilityPolicy,
     ) -> Result<(EvalResult, EvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::FullWithDelta, |engine| {
             engine.observe_function_semantic_epoch()?;
             let mut collector = DeltaCollector::new(DeltaMode::Cells);
@@ -15748,6 +17176,7 @@ where
         row: u32,
         col: u32,
     ) -> Result<Option<LiteralValue>, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Cell, |engine| {
             engine.evaluate_cell_unobserved(sheet, row, col)
         })
@@ -15786,6 +17215,7 @@ where
         &mut self,
         targets: &[(&str, u32, u32)],
     ) -> Result<Vec<Option<LiteralValue>>, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::Cells, |engine| {
             engine.evaluate_cells_unobserved(targets)
         })
@@ -15818,6 +17248,7 @@ where
         targets: &[(&str, u32, u32)],
         cancel: crate::engine::CancelToken,
     ) -> Result<Vec<Option<LiteralValue>>, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(
             EvaluationRequestKind::CellsCancellable,
             |engine| {
@@ -15855,6 +17286,7 @@ where
         &mut self,
         targets: &[(&str, u32, u32)],
     ) -> Result<(Vec<Option<LiteralValue>>, crate::engine::TargetEvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::CellsWithDelta, |engine| {
             engine.observe_function_semantic_epoch()?;
             engine.validate_deterministic_mode()?;
@@ -15875,6 +17307,7 @@ where
         &mut self,
         targets: &[(&str, u32, u32)],
     ) -> Result<(Vec<Option<LiteralValue>>, EvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.evaluate_cells_with_delta_policy(targets, EvalDeltaCompatibilityPolicy::Unlimited)
     }
 
@@ -15883,6 +17316,7 @@ where
         targets: &[(&str, u32, u32)],
         policy: EvalDeltaCompatibilityPolicy,
     ) -> Result<(Vec<Option<LiteralValue>>, EvalDelta), ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::CellsWithDelta, |engine| {
             engine.evaluate_cells_with_delta_unobserved(targets, policy)
         })
@@ -15909,6 +17343,7 @@ where
 
     /// Get the evaluation plan for target cells without actually evaluating them
     pub fn get_eval_plan(&self, targets: &[(&str, u32, u32)]) -> Result<EvalPlan, ExcelError> {
+        self.ensure_not_poisoned()?;
         if targets.is_empty() {
             return Ok(EvalPlan {
                 total_vertices_to_evaluate: 0,
@@ -17050,6 +18485,7 @@ where
         &mut self,
         cancel: crate::engine::CancelToken,
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::FullCancellable, |engine| {
             engine.observe_function_semantic_epoch()?;
             engine.active_cancel_flag = Some(cancel.clone());
@@ -17214,6 +18650,7 @@ where
         targets: &[&str],
         cancel: crate::engine::CancelToken,
     ) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(
             EvaluationRequestKind::TargetedCancellable,
             |engine| {
@@ -17296,7 +18733,12 @@ where
                 if let Some(func) = self
                     .get_function("", name)
                     .or_else(|| crate::function_registry::get("", name))
-                    && func.caps().contains(crate::function::FnCaps::VOLATILE)
+                    && crate::external_callbacks::metadata(
+                        func.as_ref(),
+                        crate::function::FnCaps::empty,
+                        || func.caps(),
+                    )
+                    .contains(crate::function::FnCaps::VOLATILE)
                 {
                     return true;
                 }
@@ -17465,6 +18907,7 @@ where
 
     /// Evaluate a single vertex without mutating the graph (for parallel evaluation)
     fn evaluate_vertex_immutable(&self, vertex_id: VertexId) -> Result<LiteralValue, ExcelError> {
+        let _callbacks = crate::external_callbacks::enter_if_missing(&self.resolver.callbacks);
         // Check if vertex exists
         if !self.graph.vertex_exists(vertex_id) {
             return Err(ExcelError::new(formualizer_common::ExcelErrorKind::Ref)
@@ -17513,6 +18956,10 @@ where
                     }
                     NamedDefinition::Literal(v) => Ok(v.clone()),
                     NamedDefinition::Formula { ast, .. } => {
+                        let _origin = self
+                            .operation_diagnostic_collector
+                            .as_ref()
+                            .map(|c| c.named_scope(vertex_id));
                         let context_sheet = match named_range.scope {
                             NameScope::Sheet(id) => id,
                             NameScope::Workbook => sheet_id,
@@ -17522,6 +18969,11 @@ where
                             .graph
                             .get_cell_ref(vertex_id)
                             .unwrap_or_else(|| self.graph.make_cell_ref(sheet_name, 0, 0));
+                        if let Some(result) = self
+                            .freshness_evaluate_name_recorded(vertex_id, sheet_name, cell_ref, ast)
+                        {
+                            return result;
+                        }
                         let interpreter = Interpreter::new_with_cell(self, sheet_name, cell_ref)
                             .with_resolved_functions(&self.resolved_functions)
                             .with_arena_cells(self);
@@ -17589,6 +19041,10 @@ where
                     }
                     NamedDefinition::Literal(v) => Ok(LiteralValue::Array(vec![vec![v.clone()]])),
                     NamedDefinition::Formula { ast, .. } => {
+                        let _origin = self
+                            .operation_diagnostic_collector
+                            .as_ref()
+                            .map(|c| c.named_scope(vertex_id));
                         let context_sheet = match named_range.scope {
                             NameScope::Sheet(id) => id,
                             NameScope::Workbook => sheet_id,
@@ -17601,14 +19057,16 @@ where
                         let interpreter = Interpreter::new_with_cell(self, sheet_name, cell_ref)
                             .with_resolved_functions(&self.resolved_functions)
                             .with_arena_cells(self);
-                        match interpreter.evaluate_ast(ast) {
-                            Ok(cv) => {
-                                let v = cv.into_literal();
-                                match v {
-                                    LiteralValue::Array(_) => Ok(v),
-                                    other => Ok(LiteralValue::Array(vec![vec![other]])),
-                                }
-                            }
+                        let result = self
+                            .freshness_evaluate_name_recorded(vertex_id, sheet_name, cell_ref, ast)
+                            .unwrap_or_else(|| {
+                                interpreter.evaluate_ast(ast).map(|cv| cv.into_literal())
+                            });
+                        match result {
+                            Ok(v) => match v {
+                                LiteralValue::Array(_) => Ok(v),
+                                other => Ok(LiteralValue::Array(vec![vec![other]])),
+                            },
                             Err(err) => Ok(LiteralValue::Error(err)),
                         }
                     }
@@ -18018,12 +19476,13 @@ impl ShimSpillManager {
                     .cloned()
                     .unwrap_or(LiteralValue::Empty);
                 let sheet_name = engine.graph.sheet_name(cell.sheet_id).to_string();
-                engine.mirror_value_to_computed_overlay(
-                    &sheet_name,
-                    cell.coord.row() + 1,
-                    cell.coord.col() + 1,
-                    &v,
-                );
+                let row = cell.coord.row() + 1;
+                let col = cell.coord.col() + 1;
+                // A cleared cell may retain an explicit Empty entry in the delta overlay
+                // (when compaction did not run); clear or compact it so the spilled computed
+                // value is visible without resurrecting a non-empty base lane on later clears.
+                engine.clear_empty_delta_overlay_cell(&sheet_name, row, col);
+                engine.mirror_value_to_computed_overlay(&sheet_name, row, col, &v);
             }
         }
         Ok(())
@@ -18510,6 +19969,20 @@ impl<R> crate::traits::EvaluationContext for Engine<R>
 where
     R: EvaluationContext,
 {
+    fn named_binding_presence(&self, name: &str, current_sheet: &str) -> Option<bool> {
+        let sheet = self.graph.sheet_id(current_sheet)?;
+        if self.graph.resolve_name_entry(name, sheet).is_some() {
+            Some(true)
+        } else {
+            self.resolver.named_binding_presence(name, current_sheet)
+        }
+    }
+    fn operation_diagnostic_collector(
+        &self,
+    ) -> Option<&crate::operation_diagnostics::OperationDiagnosticCollector> {
+        self.operation_diagnostic_collector.as_deref()
+    }
+
     fn clock(&self) -> &dyn crate::timezone::ClockProvider {
         &self.clock
     }
@@ -18564,6 +20037,14 @@ where
 
     fn current_sheet_index(&self, current_sheet: &str) -> Option<usize> {
         self.sheet_index_by_name(current_sheet)
+    }
+
+    fn workbook_path(&self) -> Option<&str> {
+        self.workbook_path.as_deref()
+    }
+
+    fn sheet_name_by_id(&self, sheet: SheetId) -> Option<&str> {
+        Some(self.graph.sheet_name(sheet))
     }
 
     fn inspect_reference(
@@ -18819,6 +20300,24 @@ where
                 end_col_abs: true,
             }
         })
+    }
+
+    fn has_formula_at_cell(&self, cell: CellRef) -> Result<bool, ExcelError> {
+        let sheet_name = self.graph.sheet_name(cell.sheet_id);
+        if sheet_name.is_empty() {
+            return Err(ExcelError::new(ExcelErrorKind::Ref));
+        }
+        if self.staged_formulas.get(sheet_name).is_some_and(|entries| {
+            entries
+                .get(cell.coord.row() + 1, cell.coord.col() + 1)
+                .is_some()
+        }) {
+            return Ok(true);
+        }
+        Ok(self
+            .graph
+            .get_vertex_for_cell(&cell)
+            .is_some_and(|vertex| self.graph.is_live_formula_vertex(vertex)))
     }
 
     fn formula_text_at_cell(&self, cell: CellRef) -> Result<Option<String>, ExcelError> {
@@ -19226,7 +20725,9 @@ where
 
                     let has_totals = table.totals_row;
                     let has_headers = table.header_row;
-                    let data_sr = if has_headers {
+                    let data_sr = if table.empty_body {
+                        er0.saturating_add(1)
+                    } else if has_headers {
                         sr0.saturating_add(1)
                     } else {
                         sr0
@@ -19435,10 +20936,10 @@ where
         if view.dims().1 == 0 {
             return None;
         }
-        // If the view is logically open-ended but the backing sheet has no physical rows,
-        // treat the mask as empty (0-len) rather than attempting to build a huge mask.
+        // If the view is logically open-ended without a synthetic tail and the backing sheet has
+        // no physical rows, treat the mask as empty (0-len) rather than building a huge mask.
         let sheet_rows = view.sheet().nrows as usize;
-        if sheet_rows == 0 || view.start_row() >= sheet_rows {
+        if view.tail().is_none() && (sheet_rows == 0 || view.start_row() >= sheet_rows) {
             return Some(std::sync::Arc::new(arrow_array::BooleanArray::new_null(0)));
         }
         self.criteria_mask_cache.get_or_build(
@@ -19501,6 +21002,7 @@ where
         }
 
         self.graph.clear_spill_region(anchor_vertex);
+        self.freshness_note_spill_change(&spill_cells, &[]);
         if let Some(scope) = Self::structural_scope_from_cells(&spill_cells) {
             self.record_structural_change(scope);
         }
@@ -19606,8 +21108,8 @@ where
 
     /// Dispatch point for one `ScheduleUnit::Cycle` (RFC #112, Stage 2).
     ///
-    /// * `CycleDetection::Static` — today's behavior, byte-for-byte: stamp
-    ///   `#CIRC!` on the (optionally dirty-filtered) members.
+    /// * `CycleDetection::Static` — the behavior before #570, byte-for-byte:
+    ///   stamp `#CIRC!` on the (optionally dirty-filtered) members.
     /// * `CycleDetection::Runtime` — evaluate the SCC via
     ///   [`Self::evaluate_scc_unit`]. The recalc-plan dirty quirk maps to:
     ///   no dirty member → skip the task entirely (values stand); any dirty
@@ -19616,6 +21118,10 @@ where
     ///
     /// Returns the number of `#CIRC!`-stamped vertices, so call sites can
     /// keep their `cycle_errors` accounting (`> 0` ⇒ count the unit).
+    ///
+    /// In an armed pass the members are committed together once the unit
+    /// has run ([`Self::freshness_cycle_unit_committed`]); a skipped unit
+    /// commits nothing.
     fn handle_cycle_unit(
         &mut self,
         cycle: &[VertexId],
@@ -19624,22 +21130,26 @@ where
         cancel_flag: Option<&AtomicBool>,
     ) -> Result<usize, ExcelError> {
         self.resource_checkpoint(cycle.len() as u64)?;
-        match self.config.cycle.detection {
+        // No dirty member: the unit is skipped (Static would stamp nothing,
+        // Runtime would not evaluate) and commits nothing.
+        if let Some(filter) = dirty_filter
+            && !cycle.iter().any(|v| filter.contains(v))
+        {
+            return Ok(0);
+        }
+        let stamped = match self.config.cycle.detection {
             CycleDetection::Static => {
-                Ok(self.apply_cycle_outcome(cycle, delta.as_deref_mut(), dirty_filter))
+                self.apply_cycle_outcome(cycle, delta.as_deref_mut(), dirty_filter)
             }
             CycleDetection::Runtime => {
-                if let Some(filter) = dirty_filter
-                    && !cycle.iter().any(|v| filter.contains(v))
-                {
-                    return Ok(0);
-                }
                 // Both policies share `evaluate_scc_unit`; they differ only
                 // in the settle loop's live-cycle arm (Error stamps,
                 // Iterate keeps passing — RFC #113).
-                self.evaluate_scc_unit(cycle, delta, cancel_flag)
+                self.evaluate_scc_unit(cycle, delta, cancel_flag)?
             }
-        }
+        };
+        self.freshness_cycle_unit_committed(cycle);
+        Ok(stamped)
     }
 
     /// Evaluate one statically-cyclic SCC under `CycleDetection::Runtime`
@@ -19767,7 +21277,7 @@ where
 
         // ── 1. Pre-task value snapshot (overlay-first for cells — G3; the
         // graph value map may be evicted in value-cache-disabled mode).
-        let snapshot: Vec<LiteralValue> = members
+        let mut snapshot: Vec<LiteralValue> = members
             .iter()
             .map(|m| match m.cell {
                 Some(cell) => {
@@ -19781,6 +21291,40 @@ where
                     .unwrap_or(LiteralValue::Empty),
             })
             .collect();
+
+        if let Some(state) = &mut self.resumable {
+            // Seed ownership belongs to this SCC, not to each vertex across
+            // every cycle it might join after an edit. A new membership uses
+            // current values, including earlier installed results.
+            let mut key = cycle.to_vec();
+            key.sort_unstable();
+            if cycle.iter().any(|v| state.new_cycle_members.contains(v)) {
+                // A changed membership supersedes earlier edit-created SCCs
+                // over these cells. Returning to an older membership later is
+                // another formation and must not resurrect its retired seed.
+                state.cycle_seeds.retain(|old, _| {
+                    state.original_cycles.contains(old)
+                        || *old == key
+                        || !cycle.iter().any(|v| old.binary_search(v).is_ok())
+                });
+            }
+            if !state.original_cycles.contains(&key) {
+                state.new_cycle_members.extend(cycle.iter().copied());
+            }
+            let seed_memory_changed = !state.original_cycles.contains(&key);
+            let seeds = state.cycle_seeds.entry(key).or_default();
+            for (member, value) in members.iter().zip(&mut snapshot) {
+                let seed = seeds.entry(member.vertex).or_insert_with(|| value.clone());
+                *value = seed.clone();
+            }
+            if seed_memory_changed {
+                state.refresh_seed_retained_bytes();
+            }
+            for (member, value) in members.iter().zip(&snapshot) {
+                self.graph.update_vertex_value_ref(member.vertex, value);
+                self.mirror_vertex_value_to_overlay(member.vertex, value);
+            }
+        }
 
         // ── 2. Pre-scan: spill anchors (FormulaArray) are stamped `#CIRC!`
         // with full spill teardown (spec §7.9, #115) and excluded from
@@ -19807,21 +21351,32 @@ where
 
         let collector = LiveEdgeCollector::new_with_names(&cell_refs, &name_keys);
 
-        // Per-member live out-edges, refreshed whenever a member re-runs.
+        // Per-member sorted, deduplicated live out-edges, refreshed whenever a
+        // member re-runs. Excluded members have empty out-edges.
         let mut out_edges: Vec<Vec<u32>> = vec![Vec::new(); n];
+        // Reusable flat edge buffer for `analyze_live_graph` (already strictly
+        // sorted and deduplicated by construction).
+        let mut edges_buf: Vec<(u32, u32)> = Vec::new();
+        // Cached live-graph classification; recomputed on Pass 1 and whenever
+        // any member's live out-edge set changes (or a member becomes excluded).
+        let mut cached_analysis: Option<crate::engine::live_graph::LiveGraphAnalysis> = None;
+        let mut edges_changed = true;
         // Position of each member in the most recent pass (-1 = did not run).
         let mut pos: Vec<i64> = vec![-1; n];
         // Whether each member's committed value changed in the most recent pass.
         let mut changed = vec![false; n];
 
-        // Evaluate-and-commit one member; returns Ok(true) when the member was
-        // stamped `#CIRC!` (array result — would-be spill anchor, spec §7.9).
+        // Evaluate-and-commit one member; records its live out-edges and
+        // returns `true` if the member's edge set changed relative to the
+        // previous pass.
         macro_rules! run_member {
             ($i:expr) => {{
                 let i: usize = $i;
                 let m = &members[i];
                 if i < recordable {
-                    collector.set_current(i as u32);
+                    collector.begin_member(i as u32);
+                } else {
+                    collector.clear_current();
                 }
                 let value = {
                     let ctx = RecordingContext::new(&*self, &collector);
@@ -19831,17 +21386,28 @@ where
                     }
                 };
                 let is_cell_formula = m.cell.is_some();
+                let mut member_edges_changed = false;
                 if is_cell_formula && matches!(value, LiteralValue::Array(_)) {
                     // A member that *would* spill inside an SCC gets the
                     // conservative §7.9 verdict. It has never spilled before
                     // (a prior spill would make it FormulaArray, pre-stamped
                     // above), so there is no projection to tear down.
+                    if i < recordable {
+                        collector.discard_current_edges();
+                    }
+                    if !out_edges[i].is_empty() {
+                        out_edges[i].clear();
+                        member_edges_changed = true;
+                    }
                     self.stamp_cycle_error(m.vertex, &circ_error, None);
                     excluded[i] = true;
                     stamped += 1;
                     changed[i] = last_value[i] != circ_error;
                     last_value[i] = circ_error.clone();
                 } else {
+                    if i < recordable && collector.finish_member_targets(&mut out_edges[i]) {
+                        member_edges_changed = true;
+                    }
                     self.graph.update_vertex_value_ref(m.vertex, &value);
                     self.mirror_vertex_value_to_overlay(m.vertex, &value);
                     // §7.14 invariant (G2): a formula member must never be
@@ -19865,6 +21431,7 @@ where
                     changed[i] = last_value[i] != value;
                     last_value[i] = value;
                 }
+                member_edges_changed
             }};
         }
 
@@ -19887,7 +21454,7 @@ where
                 if excluded[i] {
                     continue;
                 }
-                run_member!(i);
+                edges_changed |= run_member!(i);
                 pos[i] = p;
                 p += 1;
             }
@@ -19916,10 +21483,14 @@ where
         let mut iterating = false;
         let mut converged = false;
         let mut exact_fixed_point = false;
-        // Values committed by the last *full* pass; `None` until the first
-        // iteration pass runs (pass 1 has no predecessor to compare against)
-        // and reset when a settle pass runs (no cross-kind comparisons).
-        let mut prev_pass: Option<Vec<LiteralValue>> = None;
+        // Values committed by the last *full* pass (reused buffer across
+        // passes); `has_prev_pass` is `false` until the first iteration pass
+        // runs (pass 1 has no predecessor to compare against) and reset when a
+        // settle pass runs (no cross-kind comparisons).
+        let mut prev_pass: Vec<LiteralValue> = Vec::new();
+        let mut has_prev_pass = false;
+        // Reusable buffer for acyclic stale-reader selection.
+        let mut stale: Vec<usize> = Vec::new();
         // Final-round convergence stats (overwritten per round so the values
         // reported are the ones observed at stop).
         let mut iter_max_delta = 0f64;
@@ -19929,37 +21500,32 @@ where
         // behavior exactly).
         let mut settle_passes = 0usize;
         loop {
-            // Drain this pass's recordings; members that ran replace their
-            // out-edge set, members that didn't keep last-known edges.
-            let drained = collector.take_edges();
-            for i in 0..n {
-                if pos[i] >= 0 {
-                    out_edges[i].clear();
+            // Re-run Tarjan only on Pass 1 or when at least one member's live
+            // out-edge set changed (or a member was excluded). Stable-edge
+            // iteration passes reuse the previous classification in O(1).
+            if edges_changed || cached_analysis.is_none() {
+                edges_buf.clear();
+                for (i, outs) in out_edges.iter().enumerate() {
+                    if excluded[i] {
+                        continue;
+                    }
+                    for &t in outs {
+                        edges_buf.push((i as u32, t));
+                    }
                 }
-            }
-            for (from, to) in drained {
                 debug_assert!(
-                    pos[from as usize] >= 0,
-                    "edge from a member that did not run"
+                    edges_buf.windows(2).all(|w| w[0] < w[1]),
+                    "live edges must be strictly sorted and deduplicated"
                 );
-                out_edges[from as usize].push(to);
+                cached_analysis = Some(analyze_live_graph(n, &edges_buf));
+                edges_changed = false;
             }
-            let mut edges: Vec<(u32, u32)> = Vec::new();
-            for (i, outs) in out_edges.iter().enumerate() {
-                if excluded[i] {
-                    continue;
-                }
-                for &t in outs {
-                    edges.push((i as u32, t));
-                }
-            }
-            edges.sort_unstable();
-            edges.dedup();
-
-            let analysis = analyze_live_graph(n, &edges);
+            let analysis = cached_analysis
+                .as_ref()
+                .expect("live graph analysis initialized");
 
             if analysis.cycle_count > 0 {
-                // Classification repeats every iteration pass under
+                // Classification repeats whenever edges change under
                 // `Iterate`; record the widest single witness instead of
                 // accumulating so the count stays "distinct live cycles".
                 witnessed_cycles = witnessed_cycles.max(analysis.cycle_count);
@@ -19988,7 +21554,7 @@ where
                         if !order.is_empty() {
                             passes += 1;
                             for i in order {
-                                run_member!(i);
+                                let _ = run_member!(i);
                             }
                         }
                         break;
@@ -20002,10 +21568,10 @@ where
 
                         // Convergence test: the full pass that just completed
                         // vs the previous full pass, per the spec-§6 rules.
-                        // `prev_pass` is `None` until an iteration pass has
-                        // run — pass 1 has no predecessor, so no convergence
-                        // test occurs before the second pass (spec §6).
-                        if let Some(prev) = &prev_pass {
+                        // `has_prev_pass` is `false` until an iteration pass
+                        // has run — pass 1 has no predecessor, so no
+                        // convergence test occurs before the second pass.
+                        if has_prev_pass {
                             let mut round_max_delta = 0f64;
                             let mut round_nan = 0usize;
                             let mut all_converged = true;
@@ -20018,7 +21584,7 @@ where
                                     continue;
                                 }
                                 let out = crate::engine::convergence::values_converged(
-                                    &prev[i],
+                                    &prev_pass[i],
                                     &last_value[i],
                                     max_change,
                                     self.config.date_system,
@@ -20055,7 +21621,7 @@ where
                         // with `max_iterations: 1` we stop right here — each
                         // member was evaluated exactly once this recalc (the
                         // Excel accumulator contract) and no convergence test
-                        // ran (`prev_pass` is still `None`). Capping keeps
+                        // ran (`has_prev_pass` is still `false`). Capping keeps
                         // the last committed values and is NOT an error
                         // (Excel parity); telemetry records it.
                         if passes >= max_iterations as usize {
@@ -20068,13 +21634,13 @@ where
                         // member order (Gauss–Seidel: each commit is visible
                         // to later members within the pass). Live edges
                         // re-record — guards can flip near convergence
-                        // (§7.3) — so classification repeats next time
-                        // around, and a cycle that dissolves drops back to
-                        // the exact acyclic settle below.
-                        prev_pass = Some(last_value.clone());
-                        for x in pos.iter_mut() {
-                            *x = -1;
-                        }
+                        // (§7.3) — so any edge-set change triggers
+                        // re-classification next time around, and a cycle that
+                        // dissolves drops back to the exact acyclic settle
+                        // below.
+                        prev_pass.clone_from(&last_value);
+                        has_prev_pass = true;
+                        pos.fill(-1);
                         changed.fill(false);
                         passes += 1;
                         let mut p = 0i64;
@@ -20082,7 +21648,7 @@ where
                             if excluded[i] {
                                 continue;
                             }
-                            run_member!(i);
+                            edges_changed |= run_member!(i);
                             pos[i] = p;
                             p += 1;
                         }
@@ -20093,7 +21659,7 @@ where
 
             // Acyclic: find stale readers — members whose live read of `to`
             // happened before `to`'s value changed in the pass that just ran.
-            let mut stale: Vec<usize> = Vec::new();
+            stale.clear();
             for i in 0..n {
                 if excluded[i] {
                     continue;
@@ -20125,22 +21691,20 @@ where
 
             check_cancel(cancel_flag)?;
             // Re-evaluate stale readers in live-topo order, recording fresh
-            // edges (branches may flip on re-eval — spec §7.3 — which is why
-            // classification repeats).
+            // edges (branches may flip on re-eval — spec §7.3 — which triggers
+            // re-classification if any edge changes).
             // A settle pass is a partial sweep: drop the full-pass baseline
             // so a live cycle (re)appearing afterwards never compares values
             // across mixed pass kinds.
-            prev_pass = None;
+            has_prev_pass = false;
             let topo_pos = analysis.topo_positions();
             stale.sort_unstable_by_key(|&i| topo_pos[i]);
-            for x in pos.iter_mut() {
-                *x = -1;
-            }
+            pos.fill(-1);
             changed.fill(false);
             passes += 1;
             settle_passes += 1;
-            for (p, i) in stale.into_iter().enumerate() {
-                run_member!(i);
+            for (p, &i) in stale.iter().enumerate() {
+                edges_changed |= run_member!(i);
                 pos[i] = p as i64;
             }
         }
@@ -20316,6 +21880,10 @@ where
 
                 match &named_range.definition {
                     NamedDefinition::Formula { ast, .. } => {
+                        let _origin = self
+                            .operation_diagnostic_collector
+                            .as_ref()
+                            .map(|c| c.named_scope(vertex_id));
                         let context_sheet = match named_range.scope {
                             NameScope::Sheet(id) => id,
                             NameScope::Workbook => sheet_id,
@@ -20606,6 +22174,7 @@ where
             },
         )?;
 
+        self.freshness_note_spill_change(&prev_spill_cells, targets);
         self.blocked_pending_spills
             .retain(|entry| entry.0 != anchor_vertex);
         self.spill_blocker_waiters.forget(anchor_vertex);
@@ -20646,12 +22215,13 @@ where
                 let c_off = idx % width;
                 let v = rows[r_off][c_off].clone();
                 let sheet_name = self.graph.sheet_name(cell.sheet_id).to_string();
-                self.mirror_value_to_computed_overlay(
-                    &sheet_name,
-                    cell.coord.row() + 1,
-                    cell.coord.col() + 1,
-                    &v,
-                );
+                let row = cell.coord.row() + 1;
+                let col = cell.coord.col() + 1;
+                // A cleared cell may retain an explicit Empty entry in the delta overlay
+                // (when compaction did not run); clear or compact it so the spilled computed
+                // value is visible without resurrecting a non-empty base lane on later clears.
+                self.clear_empty_delta_overlay_cell(&sheet_name, row, col);
+                self.mirror_value_to_computed_overlay(&sheet_name, row, col, &v);
             }
         }
         Ok(())
@@ -20667,12 +22237,20 @@ mod authority_schedule_execution;
 mod scalar_commit_tests;
 
 #[cfg(test)]
+#[path = "tests/observed_effect_identity.rs"]
+mod observed_effect_identity;
+
+#[cfg(test)]
 #[path = "tests/pending_spill.rs"]
 mod pending_spill_tests;
 
 #[cfg(test)]
 #[path = "tests/spill_batch_abort_192.rs"]
 mod spill_batch_abort_192;
+
+#[cfg(test)]
+#[path = "tests/observed_future_spill_329.rs"]
+mod observed_future_spill_329;
 
 // ── Effects pipeline (ticket 603) ──────────────────────────────────────────
 //
@@ -20705,7 +22283,8 @@ where
             if self.freshness_drop_stale(vertex_id) {
                 return Ok(PlannedEffects::new());
             }
-            let effects = self.plan_vertex_effects_unrecorded(vertex_id, computed_value)?;
+            let mut effects = self.plan_vertex_effects_unrecorded(vertex_id, computed_value)?;
+            self.freshness_bind_planned_result(vertex_id, &mut effects);
             self.freshness_mark_committed(vertex_id);
             return Ok(effects);
         }
@@ -20954,6 +22533,9 @@ where
                                 cell.coord.col() as usize,
                             );
                             if !matches!(v, LiteralValue::Empty) {
+                                // A literal blocker can disappear without
+                                // another precedent edit. Wake only its anchor.
+                                self.spill_blocker_waiters.wait(vertex_id, *cell);
                                 return self.plan_spill_error_effects(
                                     vertex_id,
                                     "BlockedByValue",
@@ -21051,11 +22633,42 @@ where
         effect: &Effect,
         delta: Option<&mut DeltaCollector>,
         log: Option<&mut ChangeLog>,
-        computed_writes: Option<&mut ComputedWriteBuffer>,
+        mut computed_writes: Option<&mut ComputedWriteBuffer>,
     ) -> Result<(), ExcelError> {
         match effect {
             Effect::WriteCell { vertex_id, value } => {
                 self.apply_write_cell(*vertex_id, value, delta, computed_writes)?;
+            }
+            Effect::WriteRecordedCell { result } => {
+                let vertex = result.vertex();
+                let disposition = self.apply_write_cell(
+                    vertex,
+                    result.value(),
+                    delta,
+                    computed_writes.as_deref_mut(),
+                )?;
+                match disposition {
+                    OverlayWriteDisposition::Installed => {
+                        self.freshness_record_installed(result, true)
+                    }
+                    OverlayWriteDisposition::Skipped => self.freshness_record_installed(
+                        result,
+                        self.graph.get_cell_ref(vertex).is_none(),
+                    ),
+                    OverlayWriteDisposition::Buffered => {
+                        let buffer = computed_writes.expect("buffered write has its buffer");
+                        let cell = self.graph.get_cell_ref(vertex).expect("buffered grid cell");
+                        let seq = buffer.writes.last().expect("staged write").seq();
+                        buffer.read_claims.insert(
+                            (cell.sheet_id, cell.coord.row(), cell.coord.col()),
+                            BufferedReadClaim {
+                                seq,
+                                result: result.clone(),
+                                winning: false,
+                            },
+                        );
+                    }
+                }
             }
             Effect::SpillClear { anchor_vertex } => {
                 self.apply_spill_clear(*anchor_vertex, delta, log, computed_writes)?;
@@ -21079,14 +22692,15 @@ where
         Ok(())
     }
 
-    /// Apply a WriteCell effect.
+    /// Apply a WriteCell effect. Read proof is promoted by the recorded-result
+    /// caller only when this reports installation, never on mere enqueue.
     fn apply_write_cell(
         &mut self,
         vertex_id: VertexId,
         value: &LiteralValue,
         delta: Option<&mut DeltaCollector>,
         mut computed_writes: Option<&mut ComputedWriteBuffer>,
-    ) -> Result<(), ExcelError> {
+    ) -> Result<OverlayWriteDisposition, ExcelError> {
         if let Some(d) = delta
             && d.mode != DeltaMode::Off
         {
@@ -21104,8 +22718,7 @@ where
             }
         }
         self.graph.update_vertex_value_ref(vertex_id, value);
-        self.record_vertex_value_to_overlay(vertex_id, value, computed_writes)?;
-        Ok(())
+        self.record_vertex_value_to_overlay(vertex_id, value, computed_writes)
     }
 
     /// Apply a SpillClear effect.
@@ -21124,6 +22737,9 @@ where
         if spill_cells.is_empty() {
             return Ok(());
         }
+        self.graph
+            .authority_host_mut()
+            .invalidate_observed_value(anchor_vertex);
 
         // Snapshot for ChangeLog before clearing.
         let snapshot = if log.is_some() {
@@ -21149,6 +22765,7 @@ where
         }
 
         self.graph.clear_spill_region(anchor_vertex);
+        self.freshness_note_spill_change(&spill_cells, &[]);
         if let Some(scope) = Self::structural_scope_from_cells(&spill_cells) {
             self.record_structural_change(scope);
         }
@@ -21270,6 +22887,12 @@ where
             values.push(row);
         }
 
+        if self.graph.spill_may_be_intruded(anchor) {
+            cells.retain(|cell| {
+                self.graph.spill_registry_anchor_for_cell(*cell) == Some(anchor)
+                    && !self.graph.is_foreign_formula_cell(cell, anchor)
+            });
+        }
         Some(SpillSnapshot {
             target_cells: cells,
             values,
@@ -21964,6 +23587,7 @@ where
     /// This is the same flow as `evaluate_all` but threads a ChangeLog through
     /// every effect application so that spill commits/clears are captured.
     pub fn evaluate_all_logged(&mut self, log: &mut ChangeLog) -> Result<EvalResult, ExcelError> {
+        self.ensure_not_poisoned()?;
         self.observe_evaluation_resource_request(EvaluationRequestKind::FullLogged, |engine| {
             engine.evaluate_all_logged_unobserved(log)
         })
@@ -22093,5 +23717,35 @@ where
     ) -> Result<usize, ExcelError> {
         self.resource_checkpoint(layer.vertices.len() as u64)?;
         self.evaluate_layer_units(layer, None, Some(log), None, true)
+    }
+}
+
+impl<R: EvaluationContext> Engine<R> {
+    /// Whether an engine-internal panic has permanently disabled work.
+    ///
+    /// Reads and inspection remain available, but may expose stale or partially
+    /// installed values. Discard a poisoned engine; there is no recovery API.
+    ///
+    /// # Panics
+    ///
+    /// Infallible mutation methods linked here panic before doing work when
+    /// poisoned, with "formualizer engine is poisoned by an earlier internal panic; discard it".
+    /// Fallible methods return a typed EnginePoisoned error instead.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn ensure_not_poisoned(&self) -> Result<(), ExcelError> {
+        if self.is_poisoned() {
+            Err(ExcelError::new(ExcelErrorKind::Value)
+                .with_message(super::poison::POISON_MESSAGE)
+                .with_extra(formualizer_common::ExcelErrorExtra::EnginePoisoned))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn assert_not_poisoned(&self) {
+        assert!(!self.is_poisoned(), "{}", super::poison::POISON_MESSAGE);
     }
 }

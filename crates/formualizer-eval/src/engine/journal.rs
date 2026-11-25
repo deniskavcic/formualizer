@@ -162,9 +162,11 @@ impl GraphUndoBatch {
     }
 
     pub fn undo(&self, graph: &mut DependencyGraph) -> Result<(), EditorError> {
+        graph.begin_deferred_dirty();
         graph.authority_set_replay(crate::engine::authority::history::Replay::Undo);
         let replayed = self.undo_events(graph);
         graph.authority_set_replay(crate::engine::authority::history::Replay::Forward);
+        let _ = graph.end_deferred_dirty();
         replayed
     }
 
@@ -199,12 +201,14 @@ impl GraphUndoBatch {
     }
 
     pub fn redo(&self, graph: &mut DependencyGraph) -> Result<(), EditorError> {
+        graph.begin_deferred_dirty();
         graph.authority_set_replay(crate::engine::authority::history::Replay::Redo);
         let replayed = self
             .events
             .iter()
             .try_for_each(|ev| apply_forward_change_event(graph, ev));
         graph.authority_set_replay(crate::engine::authority::history::Replay::Forward);
+        let _ = graph.end_deferred_dirty();
         replayed
     }
 }
@@ -222,6 +226,14 @@ fn apply_forward_change_event(
         ChangeEvent::SetFormula { addr, new, .. } => {
             let mut editor = VertexEditor::new(graph);
             editor.set_cell_formula(*addr, new.clone());
+        }
+        ChangeEvent::TableResized {
+            name,
+            new_range,
+            new_empty_body,
+            ..
+        } => {
+            graph.resize_table_body(name, *new_range, *new_empty_body)?;
         }
         ChangeEvent::SetRowVisibility { .. } => {
             // Engine-level sidecar metadata; applied by Engine undo/redo orchestration.
@@ -292,12 +304,7 @@ fn apply_forward_change_event(
             let _ = editor.update_name(name, new_definition.clone(), *scope);
         }
         ChangeEvent::SpillCommitted { anchor, new, .. } => {
-            let _ = graph.commit_spill_region_atomic_with_fault(
-                *anchor,
-                new.target_cells.clone(),
-                new.values.clone(),
-                None,
-            );
+            let _ = graph.restore_spill_snapshot(*anchor, new);
         }
         ChangeEvent::SpillCleared { anchor, .. } => {
             graph.clear_spill_region(*anchor);

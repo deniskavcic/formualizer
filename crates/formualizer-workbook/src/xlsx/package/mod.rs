@@ -20,6 +20,9 @@ use zip::ZipArchive;
 /// transfer to their plans; opaque members never enter this map.
 pub(crate) struct Archive<'a> {
     zip: ZipArchive<Cursor<&'a [u8]>>,
+    // ZIP 9 decodes names fallibly/lazily. Preserve stable repeated discovery
+    // iteration and surface decoding errors once at the package boundary.
+    names: Vec<String>,
     parts: BTreeMap<String, VerifiedPart>,
     provisional: Option<ReadOptions>,
     ordinary: Option<(ReadOptions, ConsumptionBudget)>,
@@ -270,9 +273,9 @@ fn descriptor(bytes: &[u8], data_end: usize, central: &[u8], name: &str) -> Resu
         (false, false) => Err(unsupported("ZIP data descriptor mismatch", name)),
     }
 }
-// ZIP7 indexes members by name and can hide duplicate central-directory names.
+// The zip crate indexes members by name and can hide duplicate central-directory names.
 // This is a bounded metadata audit, NOT a ZIP writer/decoder. It runs before
-// ZIP7 parses the directory. The central directory is authoritative; local
+// the zip crate parses the directory. The central directory is authoritative; local
 // headers and data descriptors must agree with it, and members must tile the
 // bytes before the directory. ZIP64, encryption, entry comments, split
 // archives and extra fields outside a metadata-only allow-list are refused.
@@ -435,7 +438,7 @@ fn audit_directory_with<const STRICT: bool>(
         members,
     })
 }
-/// Parse the audited directory with ZIP7 and confirm it agrees with the audit.
+/// Parse the audited directory with the zip crate and confirm it agrees with the audit.
 fn open<'a, const STRICT: bool>(
     bytes: &'a [u8],
     directory: &Directory,
@@ -451,14 +454,24 @@ fn open<'a, const STRICT: bool>(
             "XLSX package",
         ));
     }
+    let names = archive
+        .file_names()
+        .map(|name| name.map(std::borrow::Cow::into_owned))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| IoError::from_backend("zip", error))?;
     Ok(Archive {
         zip: archive,
+        names,
         parts: BTreeMap::new(),
         provisional: None,
         ordinary: None,
     })
 }
 impl Archive<'_> {
+    pub(crate) fn file_names(&self) -> impl Iterator<Item = &str> {
+        self.names.iter().map(String::as_str)
+    }
+
     pub(crate) fn take_consumption_budget(&mut self) -> ConsumptionBudget {
         self.ordinary.take().expect("ordinary archive budget").1
     }
@@ -555,7 +568,11 @@ pub(crate) fn read_part(
         .by_name(name)
         .map_err(|e| IoError::from_backend("zip", e))?;
     #[cfg(test)]
-    record_inflate(file.name());
+    record_inflate(
+        file.name()
+            .map_err(|error| IoError::from_backend("zip", error))?
+            .as_ref(),
+    );
     // Package admission audited this member size; still bound both the
     // reservation and the actual read, including the over-limit probe byte.
     let capacity = usize::try_from(file.size())
@@ -731,6 +748,8 @@ fn x15_workbook_pr(
 }
 /// The workbook as discovered from its package.
 pub(super) struct Discovery {
+    pub precision_as_displayed: bool,
+    pub calculation_properties: Option<crate::calc_pr::ParsedCalcProperties>,
     pub sheets: Vec<Sheet>,
     pub date_system: formualizer_common::DateSystem,
     /// The single relationship-resolved sheet metadata part, if any.
@@ -792,6 +811,8 @@ pub(super) fn discover(
     let mut names = HashSet::new();
     let mut targets = HashSet::new();
     let mut epoch = formualizer_common::DateSystem::Excel1900;
+    let mut precision_as_displayed = false;
+    let mut calculation_properties = None;
     let mut workbook_pr = false;
     let mut ext_uri: Option<String> = None;
     let mut x15_seen = false;
@@ -910,6 +931,30 @@ pub(super) fn discover(
             if !defined_names.insert((scope, node.required("name")?.to_ascii_lowercase())) {
                 return Err(unsupported("duplicate defined name", "workbook XML"));
             }
+        }
+        if e.local == "calcPr" {
+            use crate::calc_pr::ParsedCalcProperties;
+            if let xml::Kind::Open { attributes, .. } = &node.kind
+                && attributes.iter().any(|attribute| {
+                    attribute.qualified.contains(':')
+                        && ParsedCalcProperties::ATTRIBUTE_NAMES.contains(&attribute.local)
+                })
+            {
+                return Err(unsupported(
+                    "foreign calculation-property lookalike",
+                    "calcPr",
+                ));
+            }
+            let properties = ParsedCalcProperties::from_attributes(
+                ParsedCalcProperties::ATTRIBUTE_NAMES
+                    .into_iter()
+                    .filter_map(|key| node.value(key).map(|value| (key, value))),
+            );
+            // Absence and invalid precision remain distinct in the retained
+            // properties. Publication policy for invalid precision is resolved
+            // separately from the existing valid precision-as-displayed guard.
+            precision_as_displayed = properties.full_precision == Some(false);
+            calculation_properties = Some(properties);
         }
         if e.local == "workbookPr" {
             if workbook_pr || !xml::path_is(path, xml::MAIN, &["workbook", "workbookPr"]) {
@@ -1102,6 +1147,8 @@ pub(super) fn discover(
         options,
     )?;
     Ok(Discovery {
+        precision_as_displayed,
+        calculation_properties,
         sheets,
         date_system: epoch,
         metadata,

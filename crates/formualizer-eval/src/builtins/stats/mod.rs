@@ -2119,7 +2119,7 @@ pub struct DevsqFn;
 
 /* ─────────────────────────── MAXIFS / MINIFS ──────────────────────────── */
 
-use super::utils::{ARG_ANY_ONE, criteria_match};
+use super::utils::{ARG_ANY_ONE, criteria_match_for};
 
 /// Returns the maximum numeric value in a range that meets all criteria.
 ///
@@ -2127,6 +2127,8 @@ use super::utils::{ARG_ANY_ONE, criteria_match};
 /// matching numeric value.
 ///
 /// # Remarks
+/// - An equality criterion for a date or number (`"10/26/1999"`, `"36459"`, `36459`) also
+///   matches text cells holding that date; `<>` and ordering criteria do not read date text.
 /// - Arguments must be `target_range` plus one or more criteria pairs.
 /// - Criteria are combined with logical AND.
 /// - Returns `0` when no cells satisfy all criteria.
@@ -2204,9 +2206,9 @@ impl Function for MaxIfsFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        eval_maxminifs(args, true)
+        eval_maxminifs(args, true, ctx.date_system())
     }
 }
 
@@ -2216,6 +2218,8 @@ impl Function for MaxIfsFn {
 /// matching numeric value.
 ///
 /// # Remarks
+/// - An equality criterion for a date or number (`"10/26/1999"`, `"36459"`, `36459`) also
+///   matches text cells holding that date; `<>` and ordering criteria do not read date text.
 /// - Arguments must be `target_range` plus one or more criteria pairs.
 /// - Criteria are combined with logical AND.
 /// - Returns `0` when no cells satisfy all criteria.
@@ -2293,9 +2297,9 @@ impl Function for MinIfsFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        eval_maxminifs(args, false)
+        eval_maxminifs(args, false, ctx.date_system())
     }
 }
 
@@ -2303,6 +2307,7 @@ impl Function for MinIfsFn {
 fn eval_maxminifs<'a, 'b>(
     args: &[ArgumentHandle<'a, 'b>],
     is_max: bool,
+    date_system: crate::engine::DateSystem,
 ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
     // Validate argument count: must be target_range + N pairs
     if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
@@ -2327,8 +2332,11 @@ fn eval_maxminifs<'a, 'b>(
             let mut all_match = true;
             for i in (1..args.len()).step_by(2) {
                 let crit_val = args[i].value()?.into_literal();
-                let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
-                if !criteria_match(&pred, &crit_val) {
+                let pred = crate::args::parse_criteria_for(
+                    &args[i + 1].value()?.into_literal(),
+                    date_system,
+                )?;
+                if !criteria_match_for(&pred, &crit_val, date_system) {
                     all_match = false;
                     break;
                 }
@@ -2350,7 +2358,8 @@ fn eval_maxminifs<'a, 'b>(
     let mut predicates = Vec::new();
     for i in (1..args.len()).step_by(2) {
         let crit_view = args[i].range_view().ok();
-        let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
+        let pred =
+            crate::args::parse_criteria_for(&args[i + 1].value()?.into_literal(), date_system)?;
         criteria_ranges.push(crit_view);
         predicates.push(pred);
     }
@@ -2374,7 +2383,7 @@ fn eval_maxminifs<'a, 'b>(
                     }
                     None => LiteralValue::Empty,
                 };
-                if !criteria_match(pred, &crit_val) {
+                if !criteria_match_for(pred, &crit_val, date_system) {
                     all_match = false;
                     break;
                 }
@@ -4431,9 +4440,9 @@ impl Function for ChisqInvFn {
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "F CDF with symmetric 2 and 2 degrees of freedom"
-/// formula: "=F.DIST(1,2,2,TRUE)"
-/// expected: 0.5
+/// title: "Accumulate the F distribution up to 0.8 with two degrees of freedom in each sample."
+/// formula: "=F.DIST(0.8,2,2,TRUE)"
+/// expected: 0.444444444444445
 /// ```
 ///
 /// ```yaml,sandbox
@@ -4513,9 +4522,9 @@ impl Function for FDistFn {
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "Median F quantile with symmetric 2 and 2 degrees of freedom"
-/// formula: "=F.INV(0.5,2,2)"
-/// expected: 1
+/// title: "Find the 63rd percentile with two numerator and two denominator degrees of freedom."
+/// formula: "=F.INV(0.63,2,2)"
+/// expected: 1.70270270270271
 /// ```
 ///
 /// ```yaml,sandbox
@@ -5413,9 +5422,9 @@ impl Function for NegbinomDistFn {
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "Hypergeometric PMF"
-/// formula: "=HYPGEOM.DIST(1,3,4,10,FALSE)"
-/// expected: 0.5
+/// title: "Find the probability of exactly one success in three draws from ten items, five of which count as successes."
+/// formula: "=HYPGEOM.DIST(1,3,5,10,FALSE)"
+/// expected: 0.416666666666669
 /// ```
 ///
 /// ```yaml,sandbox
@@ -7760,9 +7769,9 @@ impl Function for TTestFn {
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "Identical samples yield p-value 1"
-/// formula: "=F.TEST({1,2,3,4},{1,2,3,4})"
-/// expected: 1
+/// title: "Compare samples of equal size whose spreads differ."
+/// formula: "=F.TEST({1,2,3,4},{3,4,7,9})"
+/// expected: 0.245157188752938
 /// ```
 ///
 /// ```yaml,sandbox

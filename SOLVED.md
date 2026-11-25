@@ -4,13 +4,13 @@ This file is ours. Upstream does not have it. It lists every intentional
 divergence from Formualizer `main`, and why grid-v3 needs it. Update it in the
 same commit as a fork change.
 
-Upstream base: `dfd2f964` (v0.13.0, 2026-10-26). Everything below was carried
+Upstream base: `0a18b167` (v0.15.0, 2026-11-22). Everything below was carried
 through that merge; our earlier commits are in the branch history.
 
 Audit after a sync:
 
 ```bash
-git diff dfd2f964 --stat -- crates
+git diff v0.15.0 --stat -- crates
 git grep -n INFObySolved
 ```
 
@@ -37,7 +37,7 @@ dependency. It does not drop one. Our tests for this live in
 `engine/authority/tests/wide_rows/` and `wide_rows_order.rs`, with a two-line
 hook left in each upstream test module.
 
-### Row limits added upstream in 0.11-0.13
+### Row limits added upstream in 0.11-0.15
 
 Upstream's newer code restates Excel's height. Each site below follows the fork
 instead, and the default layout still gets upstream's values. Grid-v3's tests
@@ -65,6 +65,12 @@ for them are in `server/rust/tests/wide_rows.rs`.
   `engine/tests/insert_at_grid_edge.rs` takes its last row from the packing and
   expects `=SUM(A3:A)` there, because a range ending on the last row prints as
   open.
+- Known and unpatched: `formualizer-eval/src/builtins/math/criteria_aggregates.rs`,
+  `count_argument_equalities` (reached through `eval_if_family`, line 283, at
+  line 351; the limit is at line 124 in `resolve_count_argument`; the blank
+  count lives at lines 256-274) still counts blanks against
+  Excel's 1,048,576 rows. It only matters for COUNTIF with an array criterion
+  over an open column past Excel height, so the fork leaves upstream's value.
 
 ## Checkpoint hydrate
 

@@ -4,6 +4,190 @@ All notable changes to Formualizer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-21
+
+Formualizer 0.15.0 is a **major performance release** alongside a broad wave of **Excel compatibility fixes**. Seven targeted engine and workbook optimizations wipe out quadratic bottlenecks that show up in real-world spreadsheets: full-column array formulas, rolling horizontal `COUNTIFS`/`SUMIFS` across financial-model periods, inserting or deleting rows in large models (and hitting undo/redo), thousands of `VLOOKUP`/`MATCH` lookups into large reference tables, whole-column `SUM(A:A)` summaries, iterative circular-reference models, and long interactive editing sessions.
+
+On the compatibility side, runtime cycle detection is now the default so guarded circular formulas evaluate instead of failing with `#CIRC!`, `CELL("filename")` and `SINGLE` join the function set, legacy CSE array formulas and date-text coercion match Excel closely, and `BESSELI`/`BESSELK` reach full IEEE 754 double precision.
+
+Product packages are 0.15.0. The parser and common SDK remain 4.2.0, and `sheetport-spec` remains 0.3.3.
+
+### Highlights
+
+- **Full-column array formulas stay fast (505×–568× faster).** Writing `=SUM(A1:A1048576 * B1:B1048576)` or filtering an entire column with `=FILTER(A:A, B:B="Active")` no longer materializes a million trailing blank cells. `RangeView` preserves uniform trailing regions (`RangeTail`) through arithmetic, criteria matching, and `FILTER`, keeping Excel's exact blank semantics at a fraction of the time and memory. (#589)
+- **Horizontal rolling `COUNTIFS`/`SUMIFS` up to 25× faster.** Financial and operational models often lay time periods across columns and scan rolling windows along a row (for example, counting zero-revenue months across 36 columns with `=COUNTIFS(B5:AK5, "0")`). Criteria masks now slice only their own column instead of every column in the view—turning a 5.4-second 36-column rolling workload into 214 ms, and cutting evaluation of a real 84,000-formula model from 688 ms to 318 ms. (#616, @rdanhau)
+- **Instant row/column edits, undo, and redo at scale (69×–180× faster).** Inserting a row into the middle of a multi-thousand-formula forecast, then undoing and redoing it, now batches dirty propagation into a single linear pass instead of rescanning the dependency graph per shifted formula. On 8,000 affected formulas, `insert_rows` drops from 4.4 seconds to 25 ms, `undo` from 8.7 seconds to 127 ms, and `redo` from 8.7 seconds to 87 ms. (#577)
+- **Repeated `MATCH`/`VLOOKUP`/`XLOOKUP` lookups up to 1,809× faster.** Pricing sheets, tax brackets, and dimension-table joins that look up thousands of rows against the same large table now reuse cached sorted approximate projections and stream uncached scans directly without materializing full columns. (#414)
+- **Whole-row and whole-column aggregates without fallback (11.8×–48.5× faster).** Summary formulas like `=SUM(A:A)`, `=AVERAGE(2:2)`, or open-ended ranges like `=COUNT(A2:A)` now stay on the vectorized `AggregateKernel` instead of falling back to cell-by-cell evaluation. (#387)
+- **Iterative circular models scale linearly (1.9×–6.7× faster).** Models with debt/interest sweeps or large converging/diverging strongly connected components no longer perform quadratic live-edge and overlay scans on every iteration pass, cutting range-reading 1,000-cell SCC evaluation nearly in half (and up to 6.7× on larger SCCs) while speeding up 10,000 iterative pairs by 22–28%. (#133)
+- **Bounded memory for long interactive editing sessions.** Interactive workbooks now cap undo/change history at 10,000 events with O(1) ring-buffer eviction by default, preventing unbounded memory growth during hours of live grid edits or high-frequency batch mutations. (#366)
+- **Runtime cycle detection by default.** Formulas that only look circular statically—like `=IF(use_override, override_cell, circular_fallback)`—now evaluate cleanly as in Excel instead of stamping `#CIRC!` across downstream cells. (#570, @juchom)
+
+### What gets faster in real workbooks
+
+- **FP&A and multi-year financial models:** Rolling period windows (`COUNTIFS`/`SUMIFS` across monthly or quarterly columns) run up to 25× faster, `SUM(A:A)` rollups run up to 48× faster, and iterative interest/cash-sweep loops run 1.9×–6.7× faster.
+- **Large pricing, rate-card, and ERP lookup sheets:** Thousands of approximate or exact `VLOOKUP`, `HLOOKUP`, `MATCH`, `XLOOKUP`, and `XMATCH` calls over 50k-row tables reuse cached projections (up to 1,809× faster on repeated lookups), and loading XLSX files packed with filled-down `INDEX/MATCH` formulas avoids redundant triple-parsing during legacy-intersection lowering.
+- **Interactive spreadsheet editors and SheetPort services:** Inserting/deleting rows and undoing/redoing edits in large sheets drops from multi-second stalls to tens of milliseconds, while bounded ring-buffered history keeps long-lived workbook sessions at steady memory.
+- **Full-column formulas from Excel users:** Sheets that reference `A1:A1048576` or `$A$2:$A$1048576` inside array arithmetic, `COUNTIF`/`SUMIF`, or `FILTER` no longer blow up latency or RAM.
+
+### Added
+
+- `SINGLE`, which Excel writes for `@` as `_xlfn.SINGLE`, now evaluates as implicit intersection instead of `#NAME?`. (#565, @juchom)
+- `ArgSchema::date_serial_scalar()`: a scalar argument that reads date and time text as a serial (`CoercionPolicy::DateTimeSerial`), as Excel's date functions do. (#576, @yousefmansy1)
+- `WorkbookConfig::DEFAULT_INTERACTIVE_HISTORY_LIMIT` (`10_000`), `ChangeLog::with_max_changelog_events`, `ChangeLog::max_changelog_events`, `ChangeLog::set_max_changelog_events`, `ChangeLog::next_seq`, and `ChangeLog::drain_open_compound_spill_cleared`. (#366)
+
+### Breaking changes and upgrading
+
+- **Interactive undo history is now bounded to 10,000 events by default.** `WorkbookConfig::interactive()` sets `max_changelog_events = Some(10_000)` and caps `UndoEngine` history accordingly; oldest entries are evicted in O(1) once full. Call `set_max_changelog_events(None)` (or construct an unbounded `ChangeLog`) if you require unlimited audit history. (#366)
+- `args::parse_criteria` turns a date value (`LiteralValue::Date`) into its serial, `Eq(Number)`, instead of `Eq(Date)`, so the predicate also matches numeric text such as `"36459"`, as a number criterion does. Its serials are in the Excel 1900 system; the engine parses criteria in the workbook's own system. (#576, @yousefmansy1)
+- **Text criteria match the same cells on every path.** `COUNTIF`'s criteria mask folds case by Unicode simple case folding (`ος` = `οσ`, `s` = `ſ`) and its `?` is one character; the scalar criteria matcher compared plain lowercase and matched `?` against one byte. The matcher now folds and counts characters as the mask does, so values change for non-ASCII text in `COUNTIFS`/`SUMIFS`/`AVERAGEIFS` with a 1×1 criteria range, `MAXIFS`/`MINIFS`, the database functions, and wildcard criteria over a column that also holds numbers, booleans or blanks: `COUNTIFS(A1,"ΟΣ")` over `οσ` is now 1, and `COUNTIF(A1:A2,"caf?")` over `café` and `7` is now 1. (#566, @mcdonaldsam)
+- **Loops that never run no longer give `#CIRC!`.** Runtime cycle detection is now the default (`CycleDetection::Runtime`): the cells of a circular reference are calculated, and only a loop whose reads actually happen is stamped `#CIRC!`. A loop closed only through an `IF` branch that is not taken (`A1 =IF(FALSE,B1,10)`, `B1 =A1*1.1`) now gives `10` and `11`, as in Excel and LibreOffice, instead of `#CIRC!` in both cells and in every cell that reads them, and `recalculate_xlsx_*` no longer refuses such a workbook. `CELL` reads the value of its reference only for `contents` and `type`, as `ISFORMULA` and `SHEET` already did, so `=CELL("filename",A1)` in `A1` of a loaded workbook is not a circular reference either; typing a formula that refers to its own cell, this one included, is still refused. Array formulas inside a static loop are still `#CIRC!`, and so is a loop that does run, with the cells that read it. `last_cycle_telemetry()` now reports these loops by default. To keep the previous behavior, set `CycleConfig { detection: CycleDetection::Static, .. }` (Python `cycle_detection = "static"`, JavaScript `cycleDetection: 'static'`). (#570, @juchom)
+
+### Performance
+
+- **Uniform tails in array expressions.** `RangeView` represents uniform trailing rows and columns via a 2D `RangeTail`, avoiding full-column materialization in binary array ops, criteria evaluation, `FILTER`, and shape expansion while preserving Excel's blank-cell semantics (505×–568× faster on full-column array workloads). (#589)
+- **Single-column criteria masks along rows.** `compute_criteria_mask` narrows nonempty, untailed multi-column views to the target column before slicing Arrow buffers, eliminating O(width²) work for horizontal `COUNTIF(S)`, `SUMIF(S)`, and `AVERAGEIF(S)` ranges (up to 25× faster on 36-column sliding windows). (#616, @rdanhau)
+- **Linear structural dirty propagation.** Structural row/column edits, undo, and redo batch dirty propagation through a deferred dirty guard instead of rescanning the graph on each shifted formula (69×–180× faster at 8,000 affected formulas). (#577)
+- **Cached sorted approximate lookup projections and streaming lookups.** `MATCH`, `VLOOKUP`, `HLOOKUP`, `XLOOKUP`, and `XMATCH` reuse cached sorted approximate projections across calls and stream uncached scans directly from `RangeView` (up to 1,809× faster on repeated lookups). (#414)
+- **Full-axis and open-ended `AggregateKernel`.** Whole-row (`1:1`), whole-column (`A:A`), and open-ended (`A2:A`) references execute directly on the vectorized aggregate path with zero fallback (11.8×–48.5× faster). (#387)
+- **Linear iterative SCC evaluation.** Iterative circular-reference evaluation avoids O(|SCC|²) live-edge and overlay scans and adds an O(1) fast path when a single overlay fragment covers the evaluated slice (1.90×–6.69× faster on range-reading divergent SCCs; 1.28× faster on 10,000 iterative pairs). (#133)
+- **Bounded ring-buffer undo and change logs.** `ChangeLog` and `UndoEngine` use O(1) front-evicting storage under the default 10,000-event interactive cap. (#366)
+- **Cached legacy-intersection rewrite shapes on XLSX load.** `legacy_formula::Lowerer` caches rewritten wrap spans, skipped shapes, and A1 range shapes across filled-down formulas instead of re-tokenizing and re-parsing every `INDEX/MATCH` or range formula during workbook load (saving up to 34%–51% load time on real operational and lookup-heavy workbooks). (#615)
+- **Consolidated ZIP/XML dependencies and Arrow concatenation.** Trimmed redundant ZIP/XML crates and tightened Arrow chunk concatenation on load. (#563)
+
+### Excel compatibility
+
+- `CELL("filename")` returns the directory, `[file name]` and sheet of its reference, such as `C:\dir\[Book1.xlsx]Sheet1`, from the path a host passes to `Workbook::set_workbook_path` or `Engine::set_workbook_path`, and updates when the sheet is renamed or the path changes. Loading a file does not supply its path. With no path the workbook's identity is unknown, which gives `#VALUE!` and is reported as an unavailable operation; an empty path is a workbook never saved, which gives empty text. (#555, @mcdonaldsam)
+- Loaded XLSX workbooks preserve Excel's legacy implicit-intersection semantics for ordinary formulas even when no calculation chain is present. (#574)
+- `BESSELI` and `BESSELK` now compute modified Bessel functions to full IEEE 754 double precision (`~1e-15` relative error across integer orders and moderate to large arguments) instead of losing accuracy past small arguments. (#596)
+- Legacy CSE (`Ctrl+Shift+Enter`) array formulas loaded from XLSX preserve their fixed output extents, clear stale delta overlays on spill commit (including `>=50`-row spills), handle `cm="0"` and empty `<f t="array"/>` follower tags, and accept single-cell CSE formulas without a `ref` attribute. (#597)
+
+### Fixed
+
+- `IPMT` and `PPMT` with `type = 1` (payments at the start of each period) now deduct the period-start payment before accruing interest, matching Excel across all periods. (#594)
+- `WORKDAY`, `WORKDAY.INTL`, `NETWORKDAYS`, and `NETWORKDAYS.INTL` now count date-typed cells (such as `DATE(...)` results) inside holiday ranges instead of skipping them. (#593)
+- `IMSUB`, `IMSUM`, `IMPRODUCT`, and `IMDIV` now preserve the `j` imaginary unit suffix even when one or both operands are purely real (`=IMSUB("4","2j")` returns `"4-2j"`). (#595)
+- Volatile array follower cells saved by Excel as empty `<f ca="1"/>` tags are treated as array outputs rather than blocking recalculation. (#583, @juchom)
+- A chain of self-based `OFFSET` periods (`C1 = OFFSET(C1,0,-1)*2`, …) with a dynamic reader of every period (`=SUM(OFFSET(C1,0,0,1,1))`) no longer fails with "dynamic dependency evaluation did not converge after 5 replans" from seven periods on. Cycle-unit members are now committed together when the unit finishes. (#575, @Shirlineyn)
+- `_` and `%` in a text criterion are literal in family execution, as they already were elsewhere. A filled-down `=COUNTIF($A$1:$A$40,C1)` with `a_c` or `50%` in column C counted `abc` or `50x` too, because the family kernel passed the criterion to Arrow `ilike` unescaped. (#567, @mcdonaldsam)
+- Arithmetic reads ISO date text with a lowercase `t`: `="1999-10-26t00:00"+0` is 36459, as it already was with an uppercase `T` and as in Google Sheets. (#576, @yousefmansy1)
+- Date functions read date text. `=YEAR(A1)` with A1 holding the text `10/26/1999` returned `#VALUE!`; it now returns 1999, as Excel does, and `A1` stays text. This covers the date arguments of `DAY`, `MONTH`, `YEAR`, `HOUR`, `MINUTE`, `SECOND`, `WEEKDAY`, `WEEKNUM`, `ISOWEEKNUM`, `EDATE`, `EOMONTH`, `DATEDIF`, `DAYS`, `DAYS360`, `YEARFRAC`, `NETWORKDAYS(.INTL)` and `WORKDAY(.INTL)`. (#576, @yousefmansy1)
+- `NETWORKDAYS(.INTL)` and `WORKDAY(.INTL)` count date text in their holiday lists: `=NETWORKDAYS(A1,A2,A2)` with A1:A2 holding the text `10/26/1999` and `10/27/1999` is 1, as in Excel. Other text is still skipped. (#576, @yousefmansy1)
+- An equality criterion that is a date or a number counts text cells holding that date (`COUNTIF`, `SUMIF(S)`, `COUNTIFS`, `AVERAGEIF(S)`, `MAXIFS`/`MINIFS`, and D-functions), and criteria read dates in the workbook's own 1900/1904 date system. (#576, @yousefmansy1)
+- `@` on a `LET` local or `LAMBDA` parameter (`=LET(x,7,@x)`, `=LET(rng,A1:A10,@rng)`) uses the local, as `SINGLE` does, instead of giving `#NAME?` or the value of a workbook name with the same spelling. (#580, @juchom)
+
+## [0.14.0] - 2026-11-08
+
+Recalculation no longer has to finish before your program can do anything else. A 0.14 recalculation is a job you can run in slices of a few milliseconds, pause, resume, cancel, or point at the cells someone is looking at. Values already computed are kept. The same model works in Rust, in Python (including asyncio) and in JavaScript, and a new `formualizer/worker` entry runs a whole workbook off the main thread.
+
+Two more things change how Formualizer fits into real systems. Recalculating an XLSX file no longer has to be all or nothing: the workbook profile computes everything it can and reports exactly what it could not. And SheetPort can now feed native Excel tables, so a spreadsheet model becomes a typed function that takes a table of any length.
+
+Product packages are 0.14.0. The parser and common SDK are 4.2.0.
+
+### Highlights
+
+- **Interruptible, resumable recalculation.** Step a recalculation under a time or work budget, pause and resume it, or cancel it. Edits made between steps join the running job. Visible cells can be computed first, and you can see which cells are still pending. Completed results survive pause and cancel.
+- **A workbook in a Web Worker.** `formualizer/worker` gives you a typed async client for a workbook running in a browser worker or a Node `worker_threads` thread. It recalculates in the background and streams the cells in view, including as transferable columnar frames, while your page stays responsive. The client side loads no WASM.
+- **Python asyncio.** `await wb.evaluate_async(budget_ms=5)` recalculates without blocking the event loop. Native steps release the GIL, and cancelling the task cancels the recalculation.
+- **Partial results instead of refusals.** With `profile="workbook"`, source recalculation applies the file's saved calculation settings, recalculates everything it can and reports exactly which functions and cells it could not handle, instead of rejecting the whole workbook. `require_complete` keeps the strict guarantee when you need it.
+- **SheetPort writes native Excel tables.** Bind a table port to `Orders` and send 3 rows or 3,000: the table grows or shrinks, structured references follow, and one undo puts it back. Large table writes are about 3 times faster at 150 rows and 4 times faster at 2,000.
+- **One bad function can't take the engine down.** A panic in a native or custom function now becomes a `#VALUE!` in that cell and is reported as a coverage gap.
+
+### What you can build with it
+
+- **Spreadsheet interfaces that stay responsive.** Run a large model in a worker, render the viewport as values arrive, and let people keep typing while a recalculation is in flight. Scrolling re-prioritises the running job, so the cells on screen are computed first.
+- **Spreadsheet-backed services.** Serve many workbook requests from one Python event loop or Node process, give each a deadline, and cancel cleanly when a client goes away.
+- **Workbooks as APIs.** Describe the inputs and outputs of a pricing or planning model with SheetPort, write a request's rows into its tables, evaluate, read the outputs, and `undo()` to reset the warm workbook for the next request.
+- **Batch and agent pipelines over real files.** Recalculate thousands of XLSX files and get a precise account of each: complete, partial with the unsupported functions and affected cells listed, or refused for a stated reason.
+
+```js
+import { createWorkbookWorker } from 'formualizer/worker';
+
+const wb = await createWorkbookWorker(
+  new Worker(new URL('formualizer/worker-entry', import.meta.url), { type: 'module' }),
+  { autoRecalc: true, autoRecalcBudgetMs: 5 },
+);
+await wb.subscribeViewport({
+  rect: { sheet: 'Model', startRow: 1, startColumn: 1, endRow: 40, endColumn: 12 },
+  mode: 'values',
+  onFrame: (frame) => render(frame),
+});
+```
+
+```python
+result = await wb.evaluate_async(budget_ms=5, priority=[("Model", 1, 1, 40, 12)])
+```
+
+See [Interruptible Recalculation](https://www.formualizer.dev/docs/guides/interruptible-recalculation) for the full API in each language.
+
+### Upgrading
+
+- **Most applications need no changes.** Existing evaluation calls keep their signatures and behaviour, and the strict profile stays the default for source recalculation.
+- **Rust: new fields on the XLSX recalculation structs.** `XlsxRecalculateLimits`, `XlsxRecalculateOptions` and `XlsxRecalculateResult` gain fields for limits, profile, calculation settings, coverage and diagnostics. Struct literals that list every field need updating; build the option structs with `..Default::default()`.
+- **Rust: new enum variants.** `IoError` adds `CalculationDeferred` and `InvalidOptions`, `OverlayValue` adds `FunctionPanicked`, and `ChangeEvent` adds `TableResized`. Exhaustive matches need a new arm or a wildcard. The common SDK's new `ExcelErrorExtra` and `ResourceExhaustionReason` variants are on non-exhaustive enums.
+- **`ParserError.position` is a byte offset everywhere** (SDK 4.2.0). It is the zero-based UTF-8 byte offset of the offending token, or the formula's byte length at the end of input; some errors used to report a token index. Positions in Python and WASM error messages (`... at position N`) change accordingly. Code that indexes the formula by character or UTF-16 code unit needs to convert. (#561, @mcdonaldsam)
+- **A union of constants no longer parses.** `=1,000` is refused, as Excel does, rather than read as the union of 1 and 0. `=A1,B1` and `=SUM(1,000)` are unchanged. (#560, @mcdonaldsam)
+- **Other evaluation calls wait for an active job.** While an explicit recalculation job is running, calls such as `evaluate_all` return an error carrying `ExcelErrorExtra::RecalcJobActive` instead of interleaving with it.
+- **An internal engine panic retires that engine.** It refuses further evaluation and edits; check `is_poisoned()` and create a new workbook. Panics in functions only affect their cells.
+- **Per-cell error messages are reported only when they are the real cause.** 0.13 filled messages by reading the formula text, which could name the wrong cause, for example `Unknown function: SPDVOL` for `IFERROR(SPDVOL(1),NoSuchName)`. 0.14 reports a reason only when it is certain, such as a cell whose formula is an unknown function call (`=SPDVOL(A1)` gives `Unknown function: SPDVOL`, in the file's spelling); other error cells in `formualizer recalc --check` and the recalculation summaries show the error code without a message.
+
+### Interruptible recalculation
+
+- **Rust.** `begin_recalc`, `step_recalc` and `recalc_with` on `Engine` and `Workbook` run a recalculation as a job. Each step stops at the first safe boundary after its budget. A step reports phase, progress within the pass and the regions that changed. `prioritize_recalc` moves visible cells to the front, and `has_pending_in_rect` tells you whether a viewport is up to date. `Engine::evaluate_all_until` offers the same continuation without an explicit job. Work and deadline limits apply to the whole job, not to each step.
+- **Python.** `wb.begin_recalc()` returns a job you can step or iterate. `wb.recalc(budget_ms, on_step=...)` drives it synchronously and pauses when the callback returns `False`. `evaluate_async` runs steps on a worker thread with the GIL released and calls progress callbacks on the event loop. In Pyodide, it yields between steps. Active-job conflicts raise `RecalcAlreadyPendingError` and `RecalcJobActiveError`.
+- **JavaScript.** `wb.beginRecalc({ priority })` returns a `RecalcJob` you can step. `wb.recalc()` and `wb.evaluateWithYield()` drive it, with `AbortSignal` cancellation and a real task turn between steps. Errors carry a typed `code` such as `ALREADY_PENDING` or `RECALC_JOB_ACTIVE`.
+- **Workers.** `createWorkbookWorker`, `attachWorkbookWorker` and `createInProcessWorkbookWorker` cover the browser and Node. Every reply carries the workbook revision, the evaluated revision and the last acknowledged client edit, so optimistic UIs can reconcile. Viewport subscriptions deliver `values`, `snapshots`, `deltas` or transferable `columnar` frames with built-in flow control. Workers can also host SheetPort sessions and custom functions, registered in the worker, loaded from a module, or (opt-in) from source.
+- **Panic containment.** Panics in native functions, custom functions, metadata and resolver callbacks and clock providers become typed `#VALUE!` errors on the cells that executed them. `IFERROR` can catch the value, but the gap is still reported, so `require_complete` refuses the result.
+
+### Source recalculation
+
+- **Workbook profile.** `profile="workbook"` (Python), `{ profile: 'workbook' }` (JavaScript) or `XlsxRecalculateProfile::Workbook` (Rust) applies the file's saved iteration, cycle and calculation settings, with overrides for seed, clock and time zone.
+- **Complete, partial or deferred.** Results report coverage, operation diagnostics (unavailable or unverified functions and modes, with sample cells), and which cached values were invalidated. Partial results keep every independent result and clear only the affected caches. Corrupt packages, cancellation, resource exhaustion and output failures are still errors.
+- **Sparse sheets admitted.** A worksheet's declared size no longer counts as work; actual byte, cell and formula limits still apply.
+- **Portable limits.** The same finite limits and option validation apply across Rust, Python and WASM/TypeScript.
+
+### SheetPort
+
+- **Native table ports.** `location: { table: { name: Orders, area: body } }` binds a table port to an Excel table. Columns are matched by header name in any order; writes resize the table, clear rows past the new end and keep structured references current. See [Native Excel Tables](https://www.formualizer.dev/docs/sheetport/manifest-format#native-excel-tables).
+- **Reversible.** A table write and its resize are one undoable action. Undo, redo and a failed action restore both the values and the table's size. Writing zero rows leaves Excel's required blank row in place but reads back as an empty table.
+- **Faster writes.** Batch writes reserve sheet storage once and propagate changes once per batch, including during undo and redo. In a native release benchmark, table writes are 2.96 times faster at 150 rows and 4.29 times faster at 2,000 rows.
+- **Rust.** `resize_table` and `resize_table_body` on `Engine`, `Workbook` and their actions; `TableMetadata::empty_body`.
+
+### Performance
+
+- **Array criteria count in one pass.** `COUNTIF` with an array of equality criteria, as in the distinct-count idiom `SUM(1/COUNTIF(A1:A20000,A1:A20000))`, builds one index of the range instead of scanning it once per criterion: about 21 ms over 20,000 cells of ASCII text. Matching keeps COUNTIF's Unicode case rules. (#559, @mcdonaldsam)
+- **Array lookup values read the table once.** `LOOKUP` with an array of lookup values reads its lookup and result vectors once per call, so 1,000 lookups into a 10,000-row table take under 100 ms. (#549, @mcdonaldsam)
+
+### Excel compatibility
+
+- `SUMIF`, `SUMIFS`, `COUNTIF`, `COUNTIFS`, `AVERAGEIF` and `AVERAGEIFS` return one result per criterion when the criterion is an array. (#546, @mcdonaldsam)
+- `ISNUMBER` and the other `IS*` functions test each element of an array or range. (#547, @mcdonaldsam)
+- `XLOOKUP` and `XMATCH` look up each element of an array lookup value. (#548, @mcdonaldsam)
+- `MATCH`, `VLOOKUP`, `HLOOKUP` and `LOOKUP` look up each element of an array lookup value. Shared formulas saved without a complete calculation chain now get Excel's legacy implicit intersection, so they load and calculate row by row. (#549, @mcdonaldsam)
+- `^` and `POWER` return the real odd root of a negative base: `=(-8)^(1/3)` is `-2`. (#550, @mcdonaldsam)
+- An error criterion such as `"#N/A"` matches cells holding that error. (#551, @mcdonaldsam)
+- Rich-value metadata that only describes a formula's cached value no longer blocks loading or recalculation. (#552, @mcdonaldsam)
+- Ordinary loading ignores the saved children of a dynamic array, so a recalculated spill is not blocked by its own old values. (#553, @mcdonaldsam)
+- Formulas that read a linked workbook's defined names, such as `=SUM([1]!Sales)`, use the values cached for that link, in recalculation and in ordinary loading. A local name with the same spelling stays separate. (#554, @mcdonaldsam)
+- `HSTACK` and `VSTACK` pad uneven inputs with `#N/A`. `UNIQUE` keeps column orientation. `SORTBY` validates its criteria and sorts along either axis. Approximate descending `XLOOKUP` searches the right way. `CEILING` rounds two negatives away from zero and keeps exact decimal multiples.
+- `TYPE` classifies errors as Excel does, and `ISFORMULA` follows references.
+
+### Fixed
+
+- Inserting or deleting rows and columns no longer overwrites shifted values or leaves stale spill results.
+- A spill that shrinks no longer erases values typed into its old area. Removing a blocking value recalculates only the spills that were waiting on it.
+- An `INDIRECT` into a cell that a spill later fills now recalculates, including on the first parallel request.
+- Redefining a name, or a name recovering from an error, now recalculates every formula that depends on it, directly or through other names.
+- Partial cache publication preserves source formulas and package structure and also discards rich-value metadata for invalidated cells.
+- Unknown-function names in reports keep the file's spelling, and different spellings of one function are counted together.
+
+### Known limitations
+
+- What-If tables, saved iterative seeds and external-data refresh are not implemented. Complete coverage means no known gaps, not a proof of equivalence with Excel.
+- Jobs evaluate on one thread. A single long unit (a large family of formulas, a cycle or a slow custom function) can overrun a step's budget; use a worker to keep a UI responsive.
+- Seeded `RAND()` streams remain specific to each target.
+- Small-workbook WASM overhead and a WASM linear-memory increase for formula families are tracked as follow-ups.
+
 ## [0.13.0] - 2026-10-25
 
 XLSX reading moves in-house: Rust, Python and JavaScript now use Formualizer's native reader by default, without a second production parser underneath it. Ordinary loading reads the workbook data it needs rather than decompressing every picture and attachment along the way. Source-preserving recalculation keeps its stricter whole-package integrity contract, and Umya remains available for rich document editing and export.

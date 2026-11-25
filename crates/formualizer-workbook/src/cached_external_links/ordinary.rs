@@ -113,7 +113,21 @@ fn read_part<R: Read + Seek>(
 ) -> Result<Vec<u8>, IoError> {
     // An absent semantic cache description remains unavailable. Once a
     // selected payload is read, all safety/I/O failures are terminal.
-    if !archive.file_names().any(|name| name == part) {
+    // Preserve decoded-name membership: ZIP 9's index_for_name first prefers
+    // raw bytes, which is not the same lookup when Unicode path extras exist.
+    let present = (|| -> Result<bool, zip::result::ZipError> {
+        for name in archive.file_names() {
+            if name? == part {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })()
+    .map_err(|error| {
+        budget.fail();
+        IoError::from_backend("zip", error)
+    })?;
+    if !present {
         return Err(malformed(part));
     }
     read_selected(archive, part, options, budget)
@@ -129,14 +143,15 @@ fn read_links(
         budget.fail();
         IoError::from_backend("zip", error)
     })?;
-    if archive.len() > options.limits.max_entries
-        || archive
-            .file_names()
-            .map(|p| p.to_string())
-            .collect::<HashSet<_>>()
-            .len()
-            != archive.len()
-    {
+    let name_count = archive
+        .file_names()
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| {
+            budget.fail();
+            IoError::from_backend("zip", error)
+        })?
+        .len();
+    if archive.len() > options.limits.max_entries || name_count != archive.len() {
         return Err(crate::xlsx::options::resource(
             options,
             "external link package entry limit or duplicate entry",
@@ -289,7 +304,7 @@ pub(crate) fn load(
         {
             external_names.insert(name.to_ascii_lowercase());
         }
-        name_refs.push(reads.names.iter().map(|n| name_key(n)).collect::<Vec<_>>());
+        name_refs.push(reads.local_names().collect::<Vec<_>>());
     }
     loop {
         let before = external_names.len();
@@ -313,18 +328,22 @@ pub(crate) fn load(
             checkpoint(&options.cancel)?;
             let mut reads = Reads::default();
             collect(ast, &mut reads);
-            for ext in reads.externals {
-                if values.contains(&ext.raw) {
+            for read in reads.external_reads() {
+                let raw = read.raw();
+                if values.contains(raw) {
                     continue;
                 }
-                let (index, served) = links.serve(ext, &ext.raw, &mut area, options)?;
+                let (index, served) = match read {
+                    ExternalRead::Reference(ext) => links.serve(ext, raw, &mut area, options),
+                    ExternalRead::Name(name) => links.serve_name(name, raw, &mut area, options),
+                }?;
                 indices.insert(index);
                 match served {
                     Served::Scalar(v) => {
-                        values.scalars.insert(ext.raw.clone(), v);
+                        values.scalars.insert(raw.to_owned(), v);
                     }
                     Served::Range(v) => {
-                        values.ranges.insert(ext.raw.clone(), v);
+                        values.ranges.insert(raw.to_owned(), v);
                     }
                 }
             }
@@ -347,7 +366,7 @@ pub(crate) fn load(
         if let Some(ast) = parse_formula(text) {
             let mut reads = Reads::default();
             collect(&ast, &mut reads);
-            used.extend(reads.names.iter().map(|n| name_key(n)));
+            used.extend(reads.local_names());
             if check_shape(&ast, &external_names, text)
                 .and_then(|()| serve(&ast))
                 .is_err()
@@ -377,6 +396,19 @@ pub(crate) fn load(
             refused_names.insert(key);
         }
     }
+    // See `linked_range_in_name`: such a name is refused like any other
+    // externally computed name the cache cannot serve.
+    for ((name, _, _), ast) in names.iter().zip(&parsed_names) {
+        let mut reads = Reads::default();
+        if let Some(ast) = ast {
+            collect(ast, &mut reads);
+        }
+        if reads.external_reads().any(
+            |read| matches!(read, ExternalRead::Name(linked) if values.ranges.contains_key(linked)),
+        ) {
+            refused_names.insert(name.to_ascii_lowercase());
+        }
+    }
     // Propagate unsupported externally computed names through the name graph.
     loop {
         let before = refused_names.len();
@@ -393,11 +425,7 @@ pub(crate) fn load(
         if let Some(ast) = parse_formula(text) {
             let mut reads = Reads::default();
             collect(&ast, &mut reads);
-            if reads
-                .names
-                .iter()
-                .any(|n| refused_names.contains(&name_key(n)))
-            {
+            if reads.local_names().any(|n| refused_names.contains(&n)) {
                 refused_formulas.insert((sheet.clone(), *row, *col), text.clone());
             }
         }

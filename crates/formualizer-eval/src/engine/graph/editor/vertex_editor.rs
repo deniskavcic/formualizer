@@ -423,6 +423,14 @@ impl<'g> VertexEditor<'g> {
             values.push(row);
         }
 
+        // The rectangle can contain cells relinquished to user edits. Keep
+        // its dimensions, but snapshot ownership only for generated cells.
+        if self.graph.spill_may_be_intruded(anchor) {
+            cells.retain(|cell| {
+                self.graph.spill_registry_anchor_for_cell(*cell) == Some(anchor)
+                    && !self.graph.is_foreign_formula_cell(cell, anchor)
+            });
+        }
         Some(crate::engine::graph::editor::change_log::SpillSnapshot {
             target_cells: cells,
             values,
@@ -490,6 +498,48 @@ impl<'g> VertexEditor<'g> {
 
     // Transaction support
 
+    /// Resize native table metadata and record a reversible change.
+    pub fn resize_table(
+        &mut self,
+        name: &str,
+        new_range: crate::reference::RangeRef,
+    ) -> Result<(), EditorError> {
+        self.resize_table_body(name, new_range, false)
+    }
+
+    pub fn resize_table_body(
+        &mut self,
+        name: &str,
+        new_range: crate::reference::RangeRef,
+        new_empty_body: bool,
+    ) -> Result<(), EditorError> {
+        let old_empty_body = self
+            .graph
+            .resolve_table_entry(name)
+            .ok_or_else(|| ExcelError::new(ExcelErrorKind::Name))?
+            .empty_body;
+        let old_range = self
+            .graph
+            .resize_table_body(name, new_range, new_empty_body)?;
+        if old_range != new_range || old_empty_body != new_empty_body {
+            self.log_change(ChangeEvent::TableResized {
+                name: name.to_string(),
+                old_range,
+                new_range,
+                old_empty_body,
+                new_empty_body,
+            });
+        }
+        Ok(())
+    }
+
+    fn materialize_empty_tables(&mut self, cell: CellRef) {
+        for table in self.graph.empty_tables_at(cell) {
+            self.resize_table_body(&table.name, table.range, false)
+                .expect("existing table extent is valid");
+        }
+    }
+
     // Transaction support has been moved to TransactionContext
     // which coordinates ChangeLog, TransactionManager, and VertexEditor
 
@@ -541,6 +591,15 @@ impl<'g> VertexEditor<'g> {
                     // formula back revives it.
                     self.graph.retire_cell_for_replay(addr);
                 }
+            }
+            ChangeEvent::TableResized {
+                name,
+                old_range,
+                old_empty_body,
+                ..
+            } => {
+                self.graph
+                    .resize_table_body(&name, old_range, old_empty_body)?;
             }
             ChangeEvent::SetRowVisibility { .. } => {
                 // Engine-level sidecar metadata; handled by Engine replay/rollback paths.
@@ -636,12 +695,7 @@ impl<'g> VertexEditor<'g> {
                 // Restore previous spill region.
                 if let Some(old) = old {
                     self.graph
-                        .commit_spill_region_atomic_with_fault(
-                            anchor,
-                            old.target_cells,
-                            old.values,
-                            None,
-                        )
+                        .restore_spill_snapshot(anchor, &old)
                         .map_err(EditorError::Excel)?;
                 } else {
                     self.graph.clear_spill_region(anchor);
@@ -650,12 +704,7 @@ impl<'g> VertexEditor<'g> {
             ChangeEvent::SpillCleared { anchor, old } => {
                 // Re-commit the previous spill region.
                 self.graph
-                    .commit_spill_region_atomic_with_fault(
-                        anchor,
-                        old.target_cells,
-                        old.values,
-                        None,
-                    )
+                    .restore_spill_snapshot(anchor, &old)
                     .map_err(EditorError::Excel)?;
             }
             ChangeEvent::StagedFormulaCellChanged { .. } => {
@@ -837,9 +886,13 @@ impl<'g> VertexEditor<'g> {
         // Remove all edges
         self.graph.remove_all_edges(id);
 
-        // Mark all dependents as having #REF! error
-        for dep_id in &dependents {
-            self.graph.mark_as_ref_error(*dep_id);
+        // Mark all dependents as having #REF! error in one batched propagation.
+        if !dependents.is_empty() {
+            self.graph.begin_deferred_dirty();
+            for dep_id in &dependents {
+                self.graph.mark_as_ref_error(*dep_id);
+            }
+            let _ = self.graph.end_deferred_dirty();
         }
 
         // Mark as deleted in store (tombstone)
@@ -1054,8 +1107,10 @@ impl<'g> VertexEditor<'g> {
         before: u32,
         count: u32,
     ) -> Result<ShiftSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
         let result = self.insert_rows_impl(sheet_id, before, count);
         self.graph.authority_end_structural();
+        let _ = self.graph.end_deferred_dirty();
         result
     }
 
@@ -1154,8 +1209,10 @@ impl<'g> VertexEditor<'g> {
         start: u32,
         count: u32,
     ) -> Result<ShiftSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
         let result = self.delete_rows_impl(sheet_id, start, count);
         self.graph.authority_end_structural();
+        let _ = self.graph.end_deferred_dirty();
         result
     }
 
@@ -1285,8 +1342,10 @@ impl<'g> VertexEditor<'g> {
         before: u32,
         count: u32,
     ) -> Result<ShiftSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
         let result = self.insert_columns_impl(sheet_id, before, count);
         self.graph.authority_end_structural();
+        let _ = self.graph.end_deferred_dirty();
         result
     }
 
@@ -1504,8 +1563,10 @@ impl<'g> VertexEditor<'g> {
         start: u32,
         count: u32,
     ) -> Result<ShiftSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
         let result = self.delete_columns_impl(sheet_id, start, count);
         self.graph.authority_end_structural();
+        let _ = self.graph.end_deferred_dirty();
         result
     }
 
@@ -1688,6 +1749,9 @@ impl<'g> VertexEditor<'g> {
         fallback_old_value: Option<LiteralValue>,
         fallback_old_formula: Option<ASTNode>,
     ) -> VertexId {
+        if value != LiteralValue::Empty {
+            self.materialize_empty_tables(cell_ref);
+        }
         let sheet_name = self.graph.sheet_name(cell_ref.sheet_id).to_string();
 
         // Capture old state before modification (value + formula); fall back
@@ -1700,10 +1764,14 @@ impl<'g> VertexEditor<'g> {
             .and_then(|id| self.get_formula_ast(id))
             .or(fallback_old_formula);
 
-        // If this cell currently anchors a spill, clear the spill first and log it.
-        // This keeps spill ownership maps and children consistent under undo/redo.
+        // Record projection ownership as well as the value when a literal
+        // replaces a spill child, so undo restores a generated cell.
+        let spill_owner = self
+            .graph
+            .spill_registry_anchor_for_cell(cell_ref)
+            .or(old_id);
         let spill_snapshot =
-            old_id.and_then(|id| self.snapshot_spill_for_anchor(id).map(|s| (id, s)));
+            spill_owner.and_then(|id| self.snapshot_spill_for_anchor(id).map(|s| (id, s)));
         let did_spill_clear = spill_snapshot.is_some();
         if let Some((anchor, old_spill)) = spill_snapshot {
             if let Some(logger) = &mut self.change_logger {
@@ -1715,6 +1783,9 @@ impl<'g> VertexEditor<'g> {
                 ));
             }
             self.graph.clear_spill_region(anchor);
+            if self.graph.get_cell_ref(anchor) != Some(cell_ref) {
+                self.graph.mark_dirty_many(&[anchor]);
+            }
             self.log_change(ChangeEvent::SpillCleared {
                 anchor,
                 old: old_spill,
@@ -1850,8 +1921,12 @@ impl<'g> VertexEditor<'g> {
 
         // Snapshot old spill values before updating, but do not clear or log anything
         // until the fallible binding/admission path succeeds.
+        let spill_owner = self
+            .graph
+            .spill_registry_anchor_for_cell(cell_ref)
+            .or(old_id);
         let spill_snapshot =
-            old_id.and_then(|id| self.snapshot_spill_for_anchor(id).map(|s| (id, s)));
+            spill_owner.and_then(|id| self.snapshot_spill_for_anchor(id).map(|s| (id, s)));
         let did_spill_clear = spill_snapshot.is_some();
 
         // VertexEditor operates on internal 0-based coords; graph APIs are 1-based.
@@ -1875,6 +1950,7 @@ impl<'g> VertexEditor<'g> {
         };
         match result {
             Ok(summary) => {
+                self.materialize_empty_tables(cell_ref);
                 if let Some((anchor, old_spill)) = spill_snapshot {
                     if let Some(logger) = &mut self.change_logger {
                         logger.begin_compound(format!(
@@ -1885,6 +1961,9 @@ impl<'g> VertexEditor<'g> {
                         ));
                     }
                     self.graph.clear_spill_region(anchor);
+                    if self.graph.get_cell_ref(anchor) != Some(cell_ref) {
+                        self.graph.mark_dirty_many(&[anchor]);
+                    }
                     self.log_change(ChangeEvent::SpillCleared {
                         anchor,
                         old: old_spill,
@@ -1963,6 +2042,20 @@ impl<'g> VertexEditor<'g> {
         end_row: u32,
         end_col: u32,
     ) -> Result<RangeSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
+        let result = self.clear_range_impl(sheet_id, start_row, start_col, end_row, end_col);
+        let _ = self.graph.end_deferred_dirty();
+        result
+    }
+
+    fn clear_range_impl(
+        &mut self,
+        sheet_id: SheetId,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> Result<RangeSummary, EditorError> {
         let mut summary = RangeSummary::default();
 
         self.begin_batch();
@@ -2002,6 +2095,33 @@ impl<'g> VertexEditor<'g> {
 
     /// Copy a range to a new location
     pub fn copy_range(
+        &mut self,
+        sheet_id: SheetId,
+        from_start_row: u32,
+        from_start_col: u32,
+        from_end_row: u32,
+        from_end_col: u32,
+        to_sheet_id: SheetId,
+        to_row: u32,
+        to_col: u32,
+    ) -> Result<RangeSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
+        let result = self.copy_range_impl(
+            sheet_id,
+            from_start_row,
+            from_start_col,
+            from_end_row,
+            from_end_col,
+            to_sheet_id,
+            to_row,
+            to_col,
+        );
+        let _ = self.graph.end_deferred_dirty();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_range_impl(
         &mut self,
         sheet_id: SheetId,
         from_start_row: u32,
@@ -2123,6 +2243,7 @@ impl<'g> VertexEditor<'g> {
         to_row: u32,
         to_col: u32,
     ) -> Result<RangeSummary, EditorError> {
+        self.graph.begin_deferred_dirty();
         let result = self.move_range_impl(
             sheet_id,
             from_start_row,
@@ -2134,6 +2255,7 @@ impl<'g> VertexEditor<'g> {
             to_col,
         );
         self.graph.authority_end_structural();
+        let _ = self.graph.end_deferred_dirty();
         result
     }
 

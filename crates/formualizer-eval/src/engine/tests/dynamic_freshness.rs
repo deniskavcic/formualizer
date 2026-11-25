@@ -6,10 +6,8 @@
 //! a stale value behind, and cycles first discovered through a dynamic read
 //! must be reported as cycles.
 //!
-//! Not here: a self read first discovered through INDIRECT (`A1 =
-//! INDIRECT("A1")+1`) evaluates to 1 in legacy and under the authority,
-//! where design §8.2 case 2 expects #CIRC; that is a planned Δ of the
-//! freshness recorder, not current behavior.
+//! A first-request dynamic self read is included: its numeric probe result
+//! must not be committed before the existing cycle policy has run.
 
 use crate::engine::{Engine, EvalConfig, EvaluationTarget};
 use crate::test_workbook::TestWorkbook;
@@ -38,6 +36,11 @@ fn formula(engine: &mut Engine<TestWorkbook>, row: u32, col: u32, f: &str) {
     engine
         .set_cell_formula("Sheet1", row, col, parse(f).unwrap())
         .unwrap();
+}
+
+/// A1 address of a 1-based `(row, col)`.
+fn a1(row: u32, col: u32) -> String {
+    format!("{}{row}", crate::reference::Coord::col_to_letters(col - 1))
 }
 
 fn is_circ(engine: &Engine<TestWorkbook>, row: u32, col: u32) -> bool {
@@ -97,6 +100,62 @@ fn dynamic_to_static_chain_no_stale_clean() {
     assert_eq!(num(&e, 5, 1), Some(105.0));
     assert_eq!(num(&e, 1, 2), Some(210.0));
     assert_eq!(num(&e, 1, 3), Some(211.0));
+}
+
+#[test]
+fn first_discovered_dynamic_self_cycle_is_not_published() {
+    use crate::engine::{CycleConfig, CycleDetection, CyclePolicy};
+    for detection in [CycleDetection::Static, CycleDetection::Runtime] {
+        for targeted in [false, true] {
+            let mut e = Engine::new(
+                TestWorkbook::new(),
+                EvalConfig::default().with_cycle(CycleConfig {
+                    detection,
+                    policy: CyclePolicy::Error,
+                }),
+            );
+            formula(&mut e, 1, 1, "=INDIRECT(\"A1\")+1");
+            if targeted {
+                e.evaluate_targets(&[EvaluationTarget::Cell {
+                    sheet: "Sheet1".into(),
+                    row: 1,
+                    col: 1,
+                }])
+                .unwrap();
+            } else {
+                e.evaluate_all().unwrap();
+            }
+            assert!(
+                is_circ(&e, 1, 1),
+                "first request: {detection:?}, targeted={targeted}"
+            );
+            e.evaluate_all().unwrap();
+            assert!(is_circ(&e, 1, 1));
+        }
+    }
+}
+
+#[test]
+fn inactive_dynamic_self_read_is_not_a_cycle() {
+    let mut e = engine();
+    formula(&mut e, 1, 1, "=IF(TRUE,7,INDIRECT(\"A1\"))");
+    e.evaluate_all().unwrap();
+    assert_eq!(num(&e, 1, 1), Some(7.0));
+}
+
+#[test]
+fn edit_creating_dynamic_self_cycle_is_detected_in_same_request() {
+    let mut e = engine();
+    set(&mut e, 2, 1, 4.0);
+    e.set_cell_value("Sheet1", 1, 2, LiteralValue::Text("A2".into()))
+        .unwrap();
+    formula(&mut e, 1, 1, "=INDIRECT(B1)+1");
+    e.evaluate_all().unwrap();
+    assert_eq!(num(&e, 1, 1), Some(5.0));
+    e.set_cell_value("Sheet1", 1, 2, LiteralValue::Text("A1".into()))
+        .unwrap();
+    e.evaluate_all().unwrap();
+    assert!(is_circ(&e, 1, 1));
 }
 
 /// §8.5(11c): a two-cycle first discovered through a dynamic read, with no
@@ -507,5 +566,41 @@ fn offset_reader_after_structural_edits_and_undo_is_fresh() {
                 }
             }
         }
+    }
+}
+
+/// A period chain of dynamic readers (`C1 = OFFSET(C1,0,-1)*2`, …) where
+/// every period also has its own dynamic reader in another row
+/// (`C2 = OFFSET(C1,0,0)`). Budget models build opening balances and period
+/// totals this way. Each link and each reader resolves to a fixed cell, so
+/// the dependency order is static once the reads are known; the request
+/// must converge regardless of the number of periods.
+#[test]
+fn dynamic_reader_chain_with_per_period_dynamic_readers_converges() {
+    for periods in [4u32, 6, 7, 12, 30] {
+        // Self-based OFFSET is accepted at edit time only with Runtime
+        // detection and iteration, the configuration Excel models need.
+        let mut e = Engine::new(
+            TestWorkbook::new(),
+            EvalConfig {
+                cycle: crate::engine::CycleConfig::iterate_excel_defaults(),
+                ..EvalConfig::default()
+            },
+        );
+        set(&mut e, 1, 1, 1.0);
+        for c in 2..=periods {
+            formula(&mut e, 1, c, &format!("=OFFSET({},0,-1)*2", a1(1, c)));
+        }
+        for c in 1..=periods {
+            formula(&mut e, 2, c, &format!("=SUM(OFFSET({},0,0,1,1))", a1(1, c)));
+        }
+        e.evaluate_all()
+            .unwrap_or_else(|err| panic!("{periods} periods: {err}"));
+        // No reader may be taken for stale, at any length: before the fix
+        // every per-period reader raised the barrier.
+        assert_eq!(e.freshness_counters_for_test(), (0, 0), "{periods} periods");
+        let last = 2f64.powi(periods as i32 - 1);
+        assert_eq!(num(&e, 1, periods), Some(last), "{periods} periods, chain");
+        assert_eq!(num(&e, 2, periods), Some(last), "{periods} periods, reader");
     }
 }

@@ -53,7 +53,7 @@ fn ordinary_discovery_errors_are_not_replaced_by_unread_payload_errors() {
                 let local = bytes.windows(4).rposition(|w| w == b"PK\x03\x04").unwrap();
                 local + 30 + entries[damaged].name.len() + entries[damaged].local_extra.len()
             } else {
-                archive.by_index(damaged).unwrap().data_start() as usize
+                archive.by_index(damaged).unwrap().data_start().unwrap() as usize
             };
             drop(archive);
             bytes[offset] ^= 1;
@@ -152,7 +152,8 @@ fn compatible_container_reads_skip_rewrite_only_admission() {
             _ => unreachable!(),
         }
         let bytes = build(&entries);
-        assert!(admit(&bytes).is_err(), "strict case {case}");
+        // Rich value parts are opaque to strict package admission (case 5).
+        assert_eq!(admit(&bytes).is_err(), case != 5, "strict case {case}");
         let mut archive = package::admit_with(&bytes, &ReadOptions::default(), |_| {
             panic!("compatible package read must not invoke strict binding")
         })
@@ -412,7 +413,7 @@ fn opaque_first(bytes: &[u8]) -> Vec<u8> {
         let mut file = archive.by_index(i).unwrap();
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
-        if file.name() == "[Content_Types].xml" {
+        if file.name().expect("fixture ZIP entry name") == "[Content_Types].xml" {
             data = String::from_utf8(data)
                 .unwrap()
                 .replace(
@@ -421,12 +422,14 @@ fn opaque_first(bytes: &[u8]) -> Vec<u8> {
                 )
                 .into_bytes();
         }
-        let options = if file.name() == "unused.bin" {
+        let options = if file.name().expect("fixture ZIP entry name") == "unused.bin" {
             options.compression_method(zip::CompressionMethod::Stored)
         } else {
             options
         };
-        writer.start_file(file.name(), options).unwrap();
+        writer
+            .start_file(file.name().expect("fixture ZIP entry name"), options)
+            .unwrap();
         writer.write_all(&data).unwrap();
     }
     writer.finish().unwrap().into_inner()
@@ -549,7 +552,7 @@ fn entries_from(bytes: &[u8]) -> Vec<Entry> {
             let mut data = Vec::new();
             f.read_to_end(&mut data).unwrap();
             Entry {
-                name: f.name().to_owned(),
+                name: f.name().expect("fixture ZIP entry name").into_owned(),
                 data,
                 flags: 0,
                 method: 0,

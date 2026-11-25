@@ -1,6 +1,6 @@
 [package]
 name = "formualizer-wasm"
-version = "0.13.0"
+version = "0.15.0"
 publish = false
 edition = "2024"
 authors = ["Formualizer Contributors"]
@@ -35,7 +35,7 @@ features = [
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "9.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [features]
 default = ["console_panic", "json", "xlsx-recalc"]

@@ -35,6 +35,24 @@ fn na_result<'ctx>() -> Result<CalcValue<'ctx>, ExcelError> {
     Ok(error_value(ExcelErrorKind::Na))
 }
 
+/// A type test (`ISNUMBER`, `ISTEXT`, ...) of one argument. An array or a
+/// multi-cell range is tested element by element, as in Excel
+/// (`ISNUMBER(C1:C6)` is a column of booleans), so the verdict is never
+/// that of the array as a whole.
+fn type_test<'b>(
+    arg: &ArgumentHandle<'_, 'b>,
+    test: impl Fn(&LiteralValue) -> bool,
+) -> Result<CalcValue<'b>, ExcelError> {
+    Ok(scalar(match arg.value_for_error_inspection()? {
+        LiteralValue::Array(rows) => LiteralValue::Array(
+            rows.iter()
+                .map(|row| row.iter().map(|v| LiteralValue::Boolean(test(v))).collect())
+                .collect(),
+        ),
+        v => LiteralValue::Boolean(test(&v)),
+    }))
+}
+
 #[derive(Debug)]
 pub struct IsNumberFn;
 /// Returns TRUE when the value is numeric.
@@ -106,19 +124,17 @@ impl Function for IsNumberFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        let is_num = matches!(
-            v,
-            LiteralValue::Int(_)
-                | LiteralValue::Number(_)
-                | LiteralValue::Date(_)
-                | LiteralValue::DateTime(_)
-                | LiteralValue::Time(_)
-                | LiteralValue::Duration(_)
-        );
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            is_num,
-        )))
+        type_test(&args[0], |v| {
+            matches!(
+                v,
+                LiteralValue::Int(_)
+                    | LiteralValue::Number(_)
+                    | LiteralValue::Date(_)
+                    | LiteralValue::DateTime(_)
+                    | LiteralValue::Time(_)
+                    | LiteralValue::Duration(_)
+            )
+        })
     }
 }
 
@@ -191,10 +207,7 @@ impl Function for IsTextFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            matches!(v, LiteralValue::Text(_)),
-        )))
+        type_test(&args[0], |v| matches!(v, LiteralValue::Text(_)))
     }
 }
 
@@ -267,10 +280,7 @@ impl Function for IsLogicalFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            matches!(v, LiteralValue::Boolean(_)),
-        )))
+        type_test(&args[0], |v| matches!(v, LiteralValue::Boolean(_)))
     }
 }
 
@@ -343,10 +353,7 @@ impl Function for IsBlankFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            matches!(v, LiteralValue::Empty),
-        )))
+        type_test(&args[0], |v| matches!(v, LiteralValue::Empty))
     }
 }
 
@@ -419,10 +426,7 @@ impl Function for IsErrorFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            matches!(v, LiteralValue::Error(_)),
-        )))
+        type_test(&args[0], |v| matches!(v, LiteralValue::Error(_)))
     }
 }
 
@@ -495,14 +499,10 @@ impl Function for IsErrFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        let is_err = match v {
-            LiteralValue::Error(e) => e.kind != ExcelErrorKind::Na,
-            _ => false,
-        };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            is_err,
-        )))
+        type_test(
+            &args[0],
+            |v| matches!(v, LiteralValue::Error(e) if e.kind != ExcelErrorKind::Na),
+        )
     }
 }
 
@@ -575,23 +575,20 @@ impl Function for IsNaFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        let is_na = matches!(v, LiteralValue::Error(e) if e.kind==ExcelErrorKind::Na);
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            is_na,
-        )))
+        type_test(
+            &args[0],
+            |v| matches!(v, LiteralValue::Error(e) if e.kind == ExcelErrorKind::Na),
+        )
     }
 }
 
 #[derive(Debug)]
-pub struct IsFormulaFn; // Requires provenance tracking (not yet) => always FALSE.
-/// Returns whether a value originates from a formula.
-///
-/// Current engine metadata does not track formula provenance at this call site.
+pub struct IsFormulaFn;
+/// Returns whether the referenced cell contains a formula.
 ///
 /// # Remarks
-/// - This implementation currently returns FALSE for all inputs.
-/// - Errors are not raised solely due to provenance unavailability.
+/// - Inspects the first cell of a reference, including named references.
+/// - Non-reference values return FALSE; the referenced value need not be evaluated.
 /// - Arity mismatch returns `#VALUE!`.
 ///
 /// # Examples
@@ -614,8 +611,8 @@ pub struct IsFormulaFn; // Requires provenance tracking (not yet) => always FALS
 ///   - ISNUMBER
 ///   - ISTEXT
 /// faq:
-///   - q: "Can ISFORMULA currently detect formula provenance?"
-///     a: "Not yet. This implementation always returns FALSE because provenance metadata is not tracked here."
+///   - q: "Does a formula that returns an error count as a formula?"
+///     a: "Yes. ISFORMULA inspects the cell definition rather than its calculated value."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: ISFORMULA
@@ -631,6 +628,15 @@ impl Function for IsFormulaFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "ISFORMULA"
+    }
+
+    // Inspect the reference without eagerly evaluating its value.
+    fn dispatch<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        self.eval(args, ctx)
     }
 
     fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
@@ -652,10 +658,24 @@ impl Function for IsFormulaFn {
                 ExcelError::new_value(),
             )));
         }
-        // Formula provenance metadata is not tracked yet, so ISFORMULA currently returns FALSE.
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            false,
-        )))
+        let reference = match args[0].as_reference_or_eval() {
+            Ok(reference) => reference,
+            Err(error)
+                if error.kind == ExcelErrorKind::Ref
+                    && matches!(error.extra(), formualizer_common::ExcelErrorExtra::None) =>
+            {
+                return Ok(scalar(LiteralValue::Boolean(false)));
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(info) = _ctx.inspect_reference(&reference)? else {
+            return Ok(scalar(LiteralValue::Boolean(false)));
+        };
+        let is_formula = match info.first_cell {
+            Some(cell) => _ctx.has_formula_at_cell(cell)?,
+            None => false,
+        };
+        Ok(scalar(LiteralValue::Boolean(is_formula)))
     }
 }
 
@@ -1026,8 +1046,8 @@ pub struct TypeFn;
 /// Returns an Excel TYPE code describing the value category.
 ///
 /// # Remarks
-/// - Codes: `1` number, `2` text, `4` logical, `64` array.
-/// - Errors are propagated unchanged instead of returning `16`.
+/// - Codes: `1` number, `2` text, `4` logical, `16` error, `64` array.
+/// - Spreadsheet errors return `16`; operation failures still propagate.
 /// - Blank values map to numeric code `1` in this implementation.
 ///
 /// # Examples
@@ -1051,7 +1071,7 @@ pub struct TypeFn;
 ///   - ISLOGICAL
 /// faq:
 ///   - q: "How are errors handled by TYPE?"
-///     a: "Errors are propagated unchanged instead of returning Excel's error type code 16."
+///     a: "Spreadsheet errors return Excel's error type code 16."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: TYPE
@@ -1084,10 +1104,7 @@ impl Function for TypeFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal(); // Propagate errors directly
-        if let LiteralValue::Error(e) = v {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-        }
+        let v = args[0].value_for_error_inspection()?;
         let code = match v {
             LiteralValue::Int(_)
             | LiteralValue::Number(_)
@@ -1099,7 +1116,7 @@ impl Function for TypeFn {
             LiteralValue::Text(_) => 2,
             LiteralValue::Boolean(_) => 4,
             LiteralValue::Array(_) => 64,
-            LiteralValue::Error(_) => unreachable!(),
+            LiteralValue::Error(_) => 16,
             LiteralValue::Pending => 1, // treat as blank/zero numeric; may change
         };
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(code)))
@@ -1263,7 +1280,13 @@ impl Function for NFn {
             LiteralValue::Text(_) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0))),
             LiteralValue::Empty => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0))),
             LiteralValue::Array(_) => {
-                // Array-to-scalar implicit intersection is not implemented here; returns 0.
+                // Preserve the legacy scalar result while recording the selected array path.
+                ctx.report_unavailable_operation(
+                    crate::operation_diagnostics::UnavailableOperation::UnimplementedFunctionMode {
+                        name: self.name().into(),
+                        mode: "array_implicit_intersection",
+                    },
+                );
                 Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0)))
             }
             LiteralValue::Error(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
@@ -1534,21 +1557,27 @@ impl Function for IsOddFn {
     }
 }
 
-/// ERROR.TYPE(error_val) - Returns a number corresponding to an error type
-/// Returns:
-///   1 = #NULL!
-///   2 = #DIV/0!
-///   3 = #VALUE!
-///   4 = #REF!
-///   5 = #NAME?
-///   6 = #NUM!
-///   7 = #N/A
-///   8 = #GETTING_DATA (not commonly used)
-///   #N/A if the value is not an error
-///
-/// NOTE: Error codes 9-13 are non-standard extensions for internal error types.
 #[derive(Debug)]
 pub struct ErrorTypeFn;
+fn error_type_code(kind: ExcelErrorKind) -> i64 {
+    match kind {
+        ExcelErrorKind::Null => 1,
+        ExcelErrorKind::Div => 2,
+        ExcelErrorKind::Value => 3,
+        ExcelErrorKind::Ref => 4,
+        ExcelErrorKind::Name => 5,
+        ExcelErrorKind::Num => 6,
+        ExcelErrorKind::Na => 7,
+        ExcelErrorKind::Error => 8,
+        ExcelErrorKind::NImpl => 9,
+        ExcelErrorKind::Spill => 10,
+        ExcelErrorKind::Calc => 11,
+        ExcelErrorKind::Circ => 12,
+        ExcelErrorKind::Cancelled => 13,
+        _ => 8,
+    }
+}
+
 /// Returns the numeric code for a specific error value.
 ///
 /// # Remarks
@@ -1589,35 +1618,6 @@ pub struct ErrorTypeFn;
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
-fn error_type_code(kind: ExcelErrorKind) -> i64 {
-    match kind {
-        ExcelErrorKind::Null => 1,
-        ExcelErrorKind::Div => 2,
-        ExcelErrorKind::Value => 3,
-        ExcelErrorKind::Ref => 4,
-        ExcelErrorKind::Name => 5,
-        ExcelErrorKind::Num => 6,
-        ExcelErrorKind::Na => 7,
-        ExcelErrorKind::Error => 8,
-        ExcelErrorKind::NImpl => 9,
-        ExcelErrorKind::Spill => 10,
-        ExcelErrorKind::Calc => 11,
-        ExcelErrorKind::Circ => 12,
-        ExcelErrorKind::Cancelled => 13,
-        _ => 8,
-    }
-}
-
-/// [formualizer-docgen:schema:start]
-/// Name: ERROR.TYPE
-/// Type: ErrorTypeFn
-/// Min args: 1
-/// Max args: 1
-/// Variadic: false
-/// Signature: ERROR.TYPE(arg1: any@scalar)
-/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
-/// [formualizer-docgen:schema:end]
 impl Function for ErrorTypeFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
@@ -1639,7 +1639,7 @@ impl Function for ErrorTypeFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
+        let v = args[0].value_for_error_inspection()?;
         match v {
             LiteralValue::Error(e) => {
                 let code = error_type_code(e.kind);
@@ -1731,10 +1731,7 @@ impl Function for IsNonTextFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            !matches!(v, LiteralValue::Text(_)),
-        )))
+        type_test(&args[0], |v| !matches!(v, LiteralValue::Text(_)))
     }
 }
 
@@ -1749,13 +1746,28 @@ pub struct CellFn;
 /// - `"col"`      — the 1-based column of the upper-left cell
 /// - `"row"`      — the 1-based row of the upper-left cell
 /// - `"type"`     — `"b"` for a blank cell, `"l"` for text, `"v"` for any value
+/// - `"filename"` — the directory, `[file name]` and sheet name of the reference
+///   (the formula's own sheet without one), e.g. `C:\dir\[Book1.xlsx]Sheet1`,
+///   from the path the host gave `Engine::set_workbook_path`. An empty path
+///   means a workbook never saved, which gives empty text. With no path the
+///   workbook's identity is unknown, which gives `#VALUE!`: opening a file does
+///   not publish where it is stored.
 ///
-/// Other `info_type` values (`format`, `filename`, `parentheses`, `prefix`,
-/// `protect`, `width`) and calls without a reference return `#VALUE!`, as do
-/// 3-D references and a non-reference argument for `address`, `col` or `row`.
+/// Other `info_type` values (`format`, `parentheses`, `prefix`, `protect`,
+/// `width`) and calls without a reference (except `filename`) return
+/// `#VALUE!`, as do 3-D references and a non-reference argument for
+/// `address`, `col`, `row` or `filename`.
 /// An argument that evaluates to an error propagates that error unchanged.
 ///
-/// Known divergence: `CELL("contents", <blank cell>)` produces `Empty` in-graph
+/// # Differences from Excel
+/// Without a reference Excel's `filename` names the sheet of
+/// the cell selected at calculation time. There is no selection state here, so
+/// it names the formula's own sheet.
+/// Operation diagnostics report both gaps: a call without a reference as the
+/// `implicit_active_cell_reference` mode, even with a path, and any call as the
+/// `filename` mode while the workbook's identity is unknown.
+///
+/// `CELL("contents", <blank cell>)` produces `Empty` in-graph
 /// where Excel produces numeric `0`, so `ISBLANK(CELL("contents",Z99))` is TRUE
 /// here and FALSE in Excel; tracked in #333 and to be resolved with the #319
 /// blank-coercion variant study.
@@ -1780,7 +1792,7 @@ pub struct CellFn;
 ///   - ISREF
 /// faq:
 ///   - q: "Which info types does CELL support?"
-///     a: "contents, address, col, row and type. Unsupported info types return #VALUE!."
+///     a: "contents, address, col, row, type and filename. Unsupported info types return #VALUE!."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: CELL
@@ -1802,6 +1814,15 @@ impl Function for CellFn {
     fn min_args(&self) -> usize {
         1
     }
+    // Inspect the reference without eagerly evaluating its value: only the
+    // `contents` and `type` info types read it (`cell_top_left`).
+    fn dispatch<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        self.eval(args, ctx)
+    }
     fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
         Some(workbook_metadata_contract(self.dependency_contract(arity)))
     }
@@ -1820,14 +1841,55 @@ impl Function for CellFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<CalcValue<'b>, ExcelError> {
+        if args.is_empty() || args.len() > 2 {
+            return arity_error();
+        }
         let info_type = match args[0].value()?.into_literal() {
             LiteralValue::Error(e) => return Ok(scalar(LiteralValue::Error(e))),
             LiteralValue::Text(t) => t.to_ascii_lowercase(),
             _ => return Ok(scalar(LiteralValue::Error(ExcelError::new_value()))),
         };
         if args.len() < 2 {
-            // Without a reference, Excel reports on the last-changed cell, which is
-            // not reproducible here; #VALUE! keeps the result well-defined.
+            // Excel uses selected/active-cell state when the optional reference
+            // is absent. Invalid info types never select that unavailable mode.
+            if matches!(
+                info_type.as_str(),
+                "address"
+                    | "col"
+                    | "row"
+                    | "contents"
+                    | "type"
+                    | "color"
+                    | "filename"
+                    | "format"
+                    | "parentheses"
+                    | "prefix"
+                    | "protect"
+                    | "width"
+            ) {
+                ctx.report_unavailable_operation(
+                    crate::operation_diagnostics::UnavailableOperation::UnimplementedFunctionMode {
+                        name: self.name().into(),
+                        mode: "implicit_active_cell_reference",
+                    },
+                );
+            }
+            // `filename` names the formula's own sheet (Excel: the selected
+            // cell's sheet, a state that does not exist here); the other info
+            // types give #VALUE!, which keeps the result well-defined.
+            if info_type == "filename" {
+                // An unknown workbook identity is its own gap, as with a
+                // reference: the #VALUE! is not Excel's answer.
+                if ctx.workbook_path().is_none() {
+                    ctx.report_unavailable_operation(
+                        crate::operation_diagnostics::UnavailableOperation::UnimplementedFunctionMode {
+                            name: self.name().into(),
+                            mode: "filename",
+                        },
+                    );
+                }
+                return Ok(scalar(cell_filename(ctx, ctx.current_sheet())));
+            }
             return Ok(scalar(LiteralValue::Error(ExcelError::new_value())));
         }
 
@@ -1871,6 +1933,27 @@ impl Function for CellFn {
         };
         let row = cell.coord.row() + 1;
         let col = cell.coord.col() + 1;
+        let unsupported_mode = match info_type.as_str() {
+            "color" => Some("color"),
+            // A host-supplied identity (`Engine::set_workbook_path`), even an
+            // explicitly unsaved one, answers `filename`; without it the
+            // #VALUE! below is a gap, not Excel's answer.
+            "filename" => ctx.workbook_path().is_none().then_some("filename"),
+            "format" => Some("format"),
+            "parentheses" => Some("parentheses"),
+            "prefix" => Some("prefix"),
+            "protect" => Some("protect"),
+            "width" => Some("width"),
+            _ => None,
+        };
+        if let Some(mode) = unsupported_mode {
+            ctx.report_unavailable_operation(
+                crate::operation_diagnostics::UnavailableOperation::UnimplementedFunctionMode {
+                    name: self.name().into(),
+                    mode,
+                },
+            );
+        }
 
         match info_type.as_str() {
             "address" => {
@@ -1888,7 +1971,28 @@ impl Function for CellFn {
             }
             "col" => Ok(scalar(LiteralValue::Int(col as i64))),
             "row" => Ok(scalar(LiteralValue::Int(row as i64))),
+            "filename" => {
+                let sheet = ctx
+                    .sheet_name_by_id(cell.sheet_id)
+                    .or_else(|| reference_sheet(&reference))
+                    .unwrap_or_else(|| ctx.current_sheet());
+                Ok(scalar(cell_filename(ctx, sheet)))
+            }
             _ => Ok(scalar(LiteralValue::Error(ExcelError::new_value()))),
+        }
+    }
+}
+
+/// `CELL("filename")`: `dir\[file]sheet` from the host's workbook path (split at
+/// its last `\` or `/`), empty text for an empty path (never saved), or `#VALUE!`
+/// when the workbook's identity is unknown.
+fn cell_filename(ctx: &dyn FunctionContext<'_>, sheet: &str) -> LiteralValue {
+    match ctx.workbook_path() {
+        None => LiteralValue::Error(ExcelError::new_value()),
+        Some("") => LiteralValue::Text(String::new()),
+        Some(path) => {
+            let split = path.rfind(['\\', '/']).map_or(0, |i| i + 1);
+            LiteralValue::Text(format!("{}[{}]{sheet}", &path[..split], &path[split..]))
         }
     }
 }
@@ -1978,6 +2082,94 @@ mod tests {
     use formualizer_parse::parser::{ASTNode, ASTNodeType};
     fn interp(wb: &TestWorkbook) -> crate::interpreter::Interpreter<'_> {
         wb.interpreter()
+    }
+
+    #[derive(Debug)]
+    struct FailingArgument(ExcelError);
+    impl Function for FailingArgument {
+        fn name(&self) -> &'static str {
+            "FAILARG"
+        }
+        fn min_args(&self) -> usize {
+            0
+        }
+        fn eval<'a, 'b, 'c>(
+            &self,
+            _: &'c [ArgumentHandle<'a, 'b>],
+            _: &dyn FunctionContext<'b>,
+        ) -> Result<CalcValue<'b>, ExcelError> {
+            Err(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn error_consumers_preserve_typed_control_failures() {
+        crate::builtins::register_all_builtins();
+        use formualizer_common::{
+            ExcelErrorExtra, PlanStaleReason, PreparationStaleReason, ResourceExhaustionDetail,
+            ResourceExhaustionReason,
+        };
+        let failures = [
+            ExcelError::new(ExcelErrorKind::Cancelled),
+            ExcelError::new(ExcelErrorKind::Calc).with_extra(ExcelErrorExtra::Resource {
+                detail: Box::new(ResourceExhaustionDetail {
+                    reason: ResourceExhaustionReason::WorkUnits,
+                    limit: 1,
+                    observed: 2,
+                    request_id: Some(9),
+                }),
+            }),
+            ExcelError::new(ExcelErrorKind::Calc).with_extra(ExcelErrorExtra::PreparationStale {
+                reason: PreparationStaleReason::Authority,
+            }),
+            ExcelError::new(ExcelErrorKind::Calc).with_extra(ExcelErrorExtra::PlanStale {
+                reason: PlanStaleReason::Engine,
+            }),
+        ];
+        for error in failures {
+            let wb = TestWorkbook::new()
+                .with_function(std::sync::Arc::new(FailingArgument(error.clone())))
+                .with_cell("Sheet1", 1, 1, LiteralValue::Error(error.clone()));
+            let ctx = interp(&wb);
+            for name in [
+                "ISERROR",
+                "ISERR",
+                "ISNA",
+                "ERROR.TYPE",
+                "ISNUMBER",
+                "ISTEXT",
+                "ISLOGICAL",
+                "ISBLANK",
+                "ISNONTEXT",
+                "TYPE",
+            ] {
+                let value_ast = ASTNode::new(
+                    ASTNodeType::Literal(LiteralValue::Error(error.clone())),
+                    None,
+                );
+                let args = [ArgumentHandle::new(&value_ast, &ctx)];
+                let f = ctx.context.get_function("", name).unwrap();
+                let result = f.dispatch(&args, &ctx.function_context(None));
+                assert!(
+                    matches!(result, Err(ref actual) if actual == &error),
+                    "{name}: direct value must preserve {error:?}, got {result:?}"
+                );
+                // The reference backend's compact lanes retain error kinds but
+                // not arbitrary payloads; cancellation remains identifiable.
+                for arg in if error.kind == ExcelErrorKind::Cancelled {
+                    vec!["FAILARG()", "A1"]
+                } else {
+                    vec!["FAILARG()"]
+                } {
+                    let ast = formualizer_parse::parser::parse(format!("={name}({arg})")).unwrap();
+                    let result = ctx.evaluate_ast(&ast);
+                    assert!(
+                        matches!(result, Err(ref actual) if actual == &error),
+                        "{name}({arg}): {result:?}, expected unchanged operation failure {error:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2142,14 +2334,12 @@ mod tests {
                 .into_literal(),
             LiteralValue::Int(4)
         );
-        match f
-            .dispatch(&a_err, &ctx.function_context(None))
-            .unwrap()
-            .into_literal()
-        {
-            LiteralValue::Error(e) => assert_eq!(e, "#VALUE!"),
-            _ => panic!(),
-        }
+        assert_eq!(
+            f.dispatch(&a_err, &ctx.function_context(None))
+                .unwrap()
+                .into_literal(),
+            LiteralValue::Int(16)
+        );
         assert_eq!(
             f.dispatch(&a_arr, &ctx.function_context(None))
                 .unwrap()

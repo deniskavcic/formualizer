@@ -9,7 +9,9 @@
 //! - numeric (`>` `>=` `<` `<=`, `=`/`<>` a number): Arrow `cmp` of the
 //!   row's number lane against the operand; a non-number row is null (no
 //!   match), except for `<>` a number, where it matches (a column with
-//!   numeric text, which `=`/`<>` a number compare by value, declines);
+//!   numeric text, which `=`/`<>` a number compare by value, declines, and
+//!   so does `=` a number over a column with date text, which it matches by
+//!   serial);
 //! - `=`/`<>` a non-empty text: Arrow `ilike`/`nilike` of the row's
 //!   lowered-text lane against the lowered operand; a non-text row is null
 //!   for `=` and true for `<>`.
@@ -27,7 +29,8 @@
 //!
 //! Anything else declines (the memo or the walk evaluates it): other
 //! predicates (empty text, wildcards, booleans, errors, blanks), a 1x1
-//! range, numeric text equality over a column containing numbers,
+//! range, numeric text equality over a column containing numbers or date
+//! text,
 //! ranges of different heights or past the sheet's last row,
 //! a lane layout the mask path would read differently, a criterion whose
 //! evaluation fails, and `COUNTIF` whose criterion matches an empty cell
@@ -86,21 +89,34 @@ fn invariant_column(ds: &DataStore, arg: AstNodeId) -> bool {
 }
 
 impl CriteriaPlan {
+    /// Diagnostic fallback may repeat only pure criterion expressions.
+    pub(super) fn diagnostic_replay_safe(
+        &self,
+        functions: &crate::interpreter::ResolvedFunctions,
+        ds: &DataStore,
+    ) -> bool {
+        self.criteria
+            .iter()
+            .all(|&(_, arg)| super::memo::MemoPlan::pure_key_arg(functions, ds, arg))
+    }
     pub(super) fn plan(
         functions: &crate::interpreter::ResolvedFunctions,
+        evidence: bool,
         ds: &DataStore,
         template: AstNodeId,
     ) -> Option<Self> {
         let AstNodeData::Function { name_id, .. } = ds.get_node(template)? else {
             return None;
         };
-        let fun = functions.get(*name_id)?;
-        if fun.family_kernel() != Some(FamilyKernel::CriteriaAggregate) {
+        let fun = functions.get_for_optimized_call(*name_id, evidence)?;
+        if crate::external_callbacks::metadata(fun, || None, || fun.family_kernel())
+            != Some(FamilyKernel::CriteriaAggregate)
+        {
             return None;
         }
         let args: smallvec::SmallVec<[AstNodeId; 8]> =
             ds.get_args(template)?.iter().copied().collect();
-        let (agg, single) = match fun.name() {
+        let (agg, single) = match crate::external_callbacks::metadata(fun, || "", || fun.name()) {
             "COUNTIF" => (Agg::Count, true),
             "SUMIF" => (Agg::Sum, true),
             "AVERAGEIF" => (Agg::Average, true),
@@ -188,6 +204,10 @@ struct ColumnIndex {
     /// use: `=n`/`<>n` then match text rows by value, which the number
     /// classes cannot express.
     numeric_text: std::sync::OnceLock<Option<bool>>,
+    /// Whether any text in the column holds a date (`"10/26/1999"`), on first
+    /// use: `=n` and a bare numeric criterion (`"36459"`) then match text rows
+    /// by serial, which neither class lane can express.
+    date_text: std::sync::OnceLock<Option<bool>>,
 }
 
 impl ColumnIndex {
@@ -224,19 +244,38 @@ impl ColumnIndex {
     ) -> Option<bool> {
         *self.numeric_text.get_or_init(|| {
             let texts = self.texts(engine, ds, sheet, rows)?;
-            let locale = crate::locale::Locale::invariant();
             Some(
                 texts
                     .values
                     .iter()
-                    .any(|t| locale.parse_number_invariant(t).is_some()),
+                    .any(|t| crate::builtins::utils::criteria_numeric_text(t).is_some()),
             )
+        })
+    }
+
+    fn has_date_text<R: EvaluationContext>(
+        &self,
+        engine: &Engine<R>,
+        ds: &DataStore,
+        sheet: &str,
+        rows: usize,
+    ) -> Option<bool> {
+        *self.date_text.get_or_init(|| {
+            let texts = self.texts(engine, ds, sheet, rows)?;
+            Some(texts.values.iter().any(|t| {
+                crate::builtins::utils::criteria_date_text_serial(t, engine.config.date_system)
+                    .is_some()
+            }))
         })
     }
 }
 
 /// A run's index: every criteria column (numbers and lowered texts, as the
 /// mask path reads them), the driver's row chunks and the target lane.
+#[cfg(test)]
+static INDEX_BUILDS_FOR_TEST: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(super) struct CriteriaIndex {
     rows: usize,
     chunks: Vec<(usize, usize)>,
@@ -286,6 +325,11 @@ where
         let ref_type = ds.compact_ref(*ref_type);
         let reference = ds.reconstruct_reference_type_for_eval(ref_type, self.graph.sheet_reg());
         self.resolve_range_view(&reference, current_sheet).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn criteria_index_builds_for_test(&self) -> usize {
+        INDEX_BUILDS_FOR_TEST.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Build the run's index, or `None` where the plan declines.
@@ -344,8 +388,11 @@ where
                 numbers: std::sync::OnceLock::new(),
                 texts: std::sync::OnceLock::new(),
                 numeric_text: std::sync::OnceLock::new(),
+                date_text: std::sync::OnceLock::new(),
             })
             .collect();
+        #[cfg(test)]
+        INDEX_BUILDS_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(CriteriaIndex {
             rows,
             chunks,
@@ -472,10 +519,14 @@ where
                 .evaluate_arena_ast_with_offset(arg, row_delta, col_delta, ds, reg)
                 .ok()?
                 .into_literal();
-            let pred = crate::args::parse_criteria(&value).ok()?;
+            let pred = crate::args::parse_criteria_for(&value, self.config.date_system).ok()?;
             if plan.single
                 && plan.agg == Agg::Count
-                && crate::builtins::criteria_match(&pred, &LiteralValue::Empty)
+                && crate::builtins::utils::criteria_match_for(
+                    &pred,
+                    &LiteralValue::Empty,
+                    self.config.date_system,
+                )
             {
                 return None;
             }
@@ -483,8 +534,11 @@ where
             // Numeric text equality can match both text and numeric rows. A
             // single lane's classes cannot express that mask; use the walk.
             // Text-only columns can still use the indexed text verdicts.
+            // It also matches date text by serial (`"36459"` matches
+            // `'10/26/1999`), which the text classes cannot express either.
             if is_numeric_text_equality(&pred)
-                && !column.numbers(self, ds, sheet, rows)?.values.is_empty()
+                && (!column.numbers(self, ds, sheet, rows)?.values.is_empty()
+                    || column.has_date_text(self, ds, sheet, rows)?)
             {
                 return None;
             }
@@ -492,12 +546,15 @@ where
                 P::Gt(n) | P::Ge(n) | P::Lt(n) | P::Le(n) => {
                     number_verdicts(column.numbers(self, ds, sheet, rows)?, &pred, *n)?
                 }
-                // `=n` matches numeric text by value and `<>n` matches every
-                // non-number row but such text: decline when the column has
-                // numeric text, else the null class is all-unequal.
+                // `=n` matches numeric and date text by value and `<>n`
+                // matches every non-number row but numeric text: decline when
+                // the column has such text, else the null class is all-unequal.
                 P::Eq(LiteralValue::Number(_) | LiteralValue::Int(_))
                 | P::Ne(LiteralValue::Number(_) | LiteralValue::Int(_)) => {
-                    if column.has_numeric_text(self, ds, sheet, rows)? {
+                    if column.has_numeric_text(self, ds, sheet, rows)?
+                        || (matches!(pred, P::Eq(_))
+                            && column.has_date_text(self, ds, sheet, rows)?)
+                    {
                         return None;
                     }
                     let x = match &pred {
@@ -813,9 +870,10 @@ fn text_verdicts(
     ne: bool,
     text: &str,
 ) -> Option<(Vec<bool>, bool, bool)> {
-    use arrow::compute::kernels::comparison::{ilike, nilike};
+    use arrow_string::like::{ilike, nilike};
     let values = StringArray::from(classes.values.clone());
-    let pattern = StringArray::new_scalar(text.to_lowercase());
+    // Escaped as the mask escapes it, so `_` and `%` stay literal.
+    let pattern = StringArray::new_scalar(like_pattern(&text.to_lowercase(), false));
     let mask = if ne {
         nilike(&values, &pattern)
     } else {
@@ -830,4 +888,62 @@ fn mask_bools(mask: &BooleanArray) -> Vec<bool> {
     (0..mask.len())
         .map(|i| mask.is_valid(i) && mask.value(i))
         .collect()
+}
+
+#[cfg(test)]
+mod literal_text_tests {
+    use crate::engine::{Engine, EvalConfig, FormulaPlaneMode};
+    use crate::test_workbook::TestWorkbook;
+    use formualizer_common::LiteralValue;
+    use formualizer_parse::parser::parse;
+
+    /// `_` and `%` in an `=` text criterion are literal, as in Excel: the
+    /// kernel's `ilike` pattern is escaped as the mask's is, so `"a_c"` does
+    /// not meet `abc` and `"50%"` does not meet `50x`.
+    #[test]
+    fn family_text_equality_keeps_like_punctuation_literal() {
+        let texts = ["abc", "a_c", "50%", "50x", "x", "y"];
+        let rows = 40u32;
+        for mode in [
+            FormulaPlaneMode::Off,
+            FormulaPlaneMode::AuthoritativeExperimental,
+        ] {
+            for family in [false, true] {
+                let mut engine = Engine::new(
+                    TestWorkbook::new(),
+                    EvalConfig {
+                        family_execution: family,
+                        ..EvalConfig::default()
+                    }
+                    .with_formula_plane_mode(mode),
+                );
+                for row in 1..=rows {
+                    let text = texts[(row as usize - 1) % texts.len()];
+                    let criterion = if row % 2 == 1 { "a_c" } else { "50%" };
+                    engine
+                        .set_cell_value("Sheet1", row, 1, LiteralValue::Text(text.into()))
+                        .unwrap();
+                    engine
+                        .set_cell_value("Sheet1", row, 3, LiteralValue::Text(criterion.into()))
+                        .unwrap();
+                    let formula = format!("=COUNTIF($A$1:$A${rows},C{row})");
+                    engine
+                        .set_cell_formula("Sheet1", row, 4, parse(&formula).unwrap())
+                        .unwrap();
+                }
+                engine.evaluate_all().unwrap();
+                // Each criterion's own text is in 7 of the 40 rows.
+                for row in 1..=rows {
+                    assert_eq!(
+                        engine.get_cell_value("Sheet1", row, 4),
+                        Some(LiteralValue::Number(7.0)),
+                        "mode={mode:?} family={family} row={row}"
+                    );
+                }
+                if family {
+                    assert!(engine.family_members_for_test() > 0);
+                }
+            }
+        }
+    }
 }

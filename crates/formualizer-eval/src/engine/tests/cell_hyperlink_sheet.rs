@@ -1,8 +1,8 @@
 //! CELL / HYPERLINK builtins.
 //!
-//! CELL answers `contents`, `address`, `col`, `row` and `type` for a reference;
+//! CELL answers `contents`, `address`, `col`, `row`, `type` and `filename`;
 //! HYPERLINK returns its friendly name or link location as text.
-use crate::engine::{Engine, EvalConfig};
+use crate::engine::{CycleConfig, CycleDetection, CyclePolicy, Engine, EvalConfig};
 use crate::test_workbook::TestWorkbook;
 use formualizer_common::{ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::parse;
@@ -171,7 +171,6 @@ fn cell_contents_on_blank_is_empty_in_graph() {
 #[test]
 fn cell_unsupported_info_type_is_value_error() {
     assert_error(r#"=CELL("format",A1)"#, ExcelErrorKind::Value);
-    assert_error(r#"=CELL("filename",A1)"#, ExcelErrorKind::Value);
     assert_error(r#"=CELL("protect",A1)"#, ExcelErrorKind::Value);
     assert_error(r#"=CELL("width",A1)"#, ExcelErrorKind::Value);
 }
@@ -352,4 +351,361 @@ fn hyperlink_rejects_multi_cell_arguments() {
         ExcelErrorKind::Value,
     );
     assert_text("=HYPERLINK({1})", "1");
+}
+
+/// Evaluate `formulas` on Sheet1 of an engine with sheets `Sheet1` and `G`.
+fn eval_with_path(path: Option<&str>, formulas: &[&str]) -> Vec<LiteralValue> {
+    let mut engine = new_engine();
+    engine.graph.add_sheet("G").unwrap();
+    engine.set_workbook_path(path.map(str::to_owned));
+    for (i, formula) in formulas.iter().enumerate() {
+        engine
+            .set_cell_formula("Sheet1", i as u32 + 1, 20, parse(formula).unwrap())
+            .unwrap();
+    }
+    engine.evaluate_all().unwrap();
+    (1..=formulas.len() as u32)
+        .map(|row| engine.get_cell_value("Sheet1", row, 20).unwrap())
+        .collect()
+}
+
+#[test]
+fn cell_filename_names_the_saved_file_and_sheet() {
+    // Excel 16: `dir\[file]sheet` for the reference's sheet, the formula's
+    // own sheet without a reference, and the sheet's own spelling.
+    let text = |s: &str| LiteralValue::Text(s.into());
+    assert_eq!(
+        eval_with_path(
+            Some(r"C:\Data\Books\Model.xlsx"),
+            &[
+                r#"=CELL("filename",A1)"#,
+                r#"=CELL("filename")"#,
+                r#"=CELL("filename",g!B2:C3)"#,
+                r#"=CELL("FILENAME",Sheet1!A1)"#,
+            ],
+        ),
+        [
+            text(r"C:\Data\Books\[Model.xlsx]Sheet1"),
+            text(r"C:\Data\Books\[Model.xlsx]Sheet1"),
+            text(r"C:\Data\Books\[Model.xlsx]G"),
+            text(r"C:\Data\Books\[Model.xlsx]Sheet1"),
+        ]
+    );
+    assert_eq!(
+        eval_with_path(Some("/srv/books/m.xlsx"), &[r#"=CELL("filename")"#]),
+        [text("/srv/books/[m.xlsx]Sheet1")]
+    );
+}
+
+#[test]
+fn cell_filename_needs_a_path_from_the_host() {
+    let errors = eval_with_path(None, &[r#"=CELL("filename",A1)"#, r#"=CELL("filename")"#]);
+    for error in &errors {
+        assert!(
+            matches!(error, LiteralValue::Error(e) if e.kind == ExcelErrorKind::Value),
+            "{errors:?}"
+        );
+    }
+    // An empty path is a workbook never saved.
+    assert_eq!(
+        eval_with_path(
+            Some(""),
+            &[r#"=CELL("filename",A1)"#, r#"=CELL("filename")"#]
+        ),
+        [
+            LiteralValue::Text(String::new()),
+            LiteralValue::Text(String::new())
+        ]
+    );
+    // A non-reference argument is still #VALUE!, an error argument propagates.
+    let errors = eval_with_path(
+        Some(r"C:\b.xlsx"),
+        &[r#"=CELL("filename",42)"#, r#"=CELL("filename",1/0)"#],
+    );
+    assert!(
+        matches!(&errors[0], LiteralValue::Error(e) if e.kind == ExcelErrorKind::Value),
+        "{errors:?}"
+    );
+    assert!(
+        matches!(&errors[1], LiteralValue::Error(e) if e.kind == ExcelErrorKind::Div),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn cell_filename_follows_a_renamed_sheet_and_a_new_path() {
+    for family_execution in [true, false] {
+        let config = EvalConfig {
+            family_execution,
+            ..EvalConfig::default()
+        };
+        let mut engine = Engine::new(TestWorkbook::new(), config);
+        engine.graph.add_sheet("G").unwrap();
+        engine.set_workbook_path(Some(r"C:\a\One.xlsx".into()));
+        engine
+            .define_name(
+                "Tag",
+                crate::engine::named_range::NamedDefinition::Formula {
+                    ast: parse(r#"=CELL("filename")"#).unwrap(),
+                    dependencies: Vec::new(),
+                    range_deps: Vec::new(),
+                },
+                crate::engine::named_range::NameScope::Workbook,
+            )
+            .unwrap();
+        let formulas = [
+            ("Sheet1", 1, r#"=CELL("filename",G!A1)"#),
+            ("Sheet1", 2, r#"=CELL("filename",G!A2)"#),
+            ("Sheet1", 3, r#"=CELL("filename",G!A3)"#),
+            ("Sheet1", 4, r#"="in "&T1"#),
+            ("Sheet1", 5, "=Tag"),
+            ("G", 1, r#"=CELL("filename")"#),
+            ("Sheet1", 6, "=G!T1"),
+        ];
+        for (sheet, row, formula) in formulas {
+            engine
+                .set_cell_formula(sheet, row, 20, parse(formula).unwrap())
+                .unwrap();
+        }
+        // `g` is what a read of sheet G gives, `name` what `=Tag` gives: the
+        // name reads the formula's own sheet, Sheet1.
+        let check = |engine: &mut Engine<TestWorkbook>, g: &str, name: &str| {
+            engine.evaluate_all().unwrap();
+            let text = |s: &str| Some(LiteralValue::Text(s.to_owned()));
+            for row in [1, 2, 3, 6] {
+                assert_eq!(
+                    engine.get_cell_value("Sheet1", row, 20),
+                    text(g),
+                    "row {row}, family execution {family_execution}"
+                );
+            }
+            assert_eq!(
+                engine.get_cell_value("Sheet1", 4, 20),
+                text(&format!("in {g}")),
+                "a dependent, family execution {family_execution}"
+            );
+            assert_eq!(
+                engine.get_cell_value("Sheet1", 5, 20),
+                text(name),
+                "a defined name, family execution {family_execution}"
+            );
+        };
+        let sheet1 = r"C:\a\[One.xlsx]Sheet1";
+        check(&mut engine, r"C:\a\[One.xlsx]G", sheet1);
+
+        let g = engine.sheet_id("G").unwrap();
+        engine.rename_sheet(g, "Renamed").unwrap();
+        check(&mut engine, r"C:\a\[One.xlsx]Renamed", sheet1);
+
+        engine.set_workbook_path(Some("/b/Two.xlsx".into()));
+        check(&mut engine, "/b/[Two.xlsx]Renamed", "/b/[Two.xlsx]Sheet1");
+    }
+}
+
+/// Evaluate `formula` alone on Sheet1 and return its value with the unavailable
+/// operations it reported.
+fn filename_reports(
+    path: Option<&str>,
+    formula: &str,
+    family_execution: bool,
+) -> (
+    LiteralValue,
+    Vec<crate::operation_diagnostics::UnavailableOperation>,
+) {
+    let config = EvalConfig {
+        family_execution,
+        ..EvalConfig::default()
+    };
+    let mut engine = Engine::new(TestWorkbook::new(), config);
+    engine.enable_operation_diagnostics(8);
+    engine.set_workbook_path(path.map(str::to_owned));
+    engine
+        .set_cell_formula("Sheet1", 1, 20, parse(formula).unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    let report = engine.take_operation_diagnostics().unwrap().unwrap();
+    let value = engine.get_cell_value("Sheet1", 1, 20).unwrap();
+    let operations = report
+        .roots
+        .iter()
+        .map(|root| root.operation.as_ref().clone())
+        .collect();
+    (value, operations)
+}
+
+#[test]
+fn cell_filename_reports_unknown_identity_and_the_implicit_active_cell() {
+    use crate::operation_diagnostics::UnavailableOperation::UnimplementedFunctionMode;
+    let gap = |mode: &'static str| UnimplementedFunctionMode {
+        name: "CELL".into(),
+        mode,
+    };
+    let text = |s: &str| LiteralValue::Text(s.into());
+    let value_error = LiteralValue::Error(formualizer_common::ExcelError::new_value());
+    let path = Some(r"C:\a\b.xlsx");
+    let cases = [
+        // Unknown identity is #VALUE! and still a reported gap.
+        (
+            None,
+            r#"=CELL("filename",A1)"#,
+            value_error.clone(),
+            vec![gap("filename")],
+        ),
+        // A host-supplied identity, or an explicitly unsaved workbook, closes it.
+        (
+            path,
+            r#"=CELL("filename",A1)"#,
+            text(r"C:\a\[b.xlsx]Sheet1"),
+            vec![],
+        ),
+        (Some(""), r#"=CELL("filename",A1)"#, text(""), vec![]),
+        // Without a reference Excel reads the selected cell, which is not
+        // available here, with or without a path; an unknown identity is a
+        // second gap.
+        (
+            None,
+            r#"=CELL("filename")"#,
+            value_error.clone(),
+            vec![gap("filename"), gap("implicit_active_cell_reference")],
+        ),
+        (
+            path,
+            r#"=CELL("filename")"#,
+            text(r"C:\a\[b.xlsx]Sheet1"),
+            vec![gap("implicit_active_cell_reference")],
+        ),
+        (
+            Some(""),
+            r#"=CELL("filename")"#,
+            text(""),
+            vec![gap("implicit_active_cell_reference")],
+        ),
+        // A non-reference argument is an ordinary #VALUE!, not a gap.
+        (None, r#"=CELL("filename",42)"#, value_error.clone(), vec![]),
+    ];
+    for family_execution in [true, false] {
+        for (path, formula, value, operations) in &cases {
+            assert_eq!(
+                filename_reports(*path, formula, family_execution),
+                (value.clone(), operations.clone()),
+                "{formula} with path {path:?}, family execution {family_execution}"
+            );
+        }
+    }
+}
+
+/// `CELL` reads the value of its reference only for `contents` and `type`
+/// (#570): `A1 =CELL(<info>,B1)` with `B1 =A1` is a loop that happens for
+/// those two, and a static cycle that runtime detection calculates for the
+/// others.
+#[test]
+fn cell_metadata_does_not_read_the_referenced_value() {
+    let text = |s: &str| Some(LiteralValue::Text(s.into()));
+    let cases = [
+        ("filename", text(r"C:\dir\[book.xlsx]Sheet1")),
+        ("address", text("$B$1")),
+        ("row", Some(LiteralValue::Number(1.0))),
+        ("col", Some(LiteralValue::Number(2.0))),
+        // `None`: a live cycle, #CIRC! in both cells.
+        ("contents", None),
+        ("type", None),
+    ];
+    for (info, expected) in cases {
+        let config = EvalConfig::default().with_cycle(CycleConfig {
+            detection: CycleDetection::Runtime,
+            policy: CyclePolicy::Error,
+        });
+        let mut engine = Engine::new(TestWorkbook::new(), config);
+        engine.set_workbook_path(Some(r"C:\dir\book.xlsx".to_owned()));
+        let formula = format!(r#"=CELL("{info}",B1)"#);
+        engine
+            .set_cell_formula("Sheet1", 1, 1, parse(&formula).unwrap())
+            .unwrap();
+        engine
+            .set_cell_formula("Sheet1", 1, 2, parse("=A1").unwrap())
+            .unwrap();
+        engine.evaluate_all().unwrap();
+        for col in [1, 2] {
+            let value = engine.get_cell_value("Sheet1", 1, col);
+            match &expected {
+                Some(expected) => assert_eq!(value.as_ref(), Some(expected), "{info}, col {col}"),
+                None => assert!(
+                    matches!(&value, Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Circ),
+                    "{info}, col {col}: {value:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// Returns `B3` as a reference and counts its calls on both paths.
+#[derive(Debug)]
+struct CountedRef(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl CountedRef {
+    fn reference() -> formualizer_parse::parser::ReferenceType {
+        formualizer_parse::parser::ReferenceType::cell(None, 3, 2)
+    }
+}
+impl crate::function::Function for CountedRef {
+    fn caps(&self) -> crate::function::FnCaps {
+        crate::function::FnCaps::PURE | crate::function::FnCaps::RETURNS_REFERENCE
+    }
+    fn name(&self) -> &'static str {
+        "COUNTED_REF"
+    }
+    fn min_args(&self) -> usize {
+        0
+    }
+    fn eval_reference<'a, 'b, 'c>(
+        &self,
+        _args: &'c [crate::traits::ArgumentHandle<'a, 'b>],
+        _ctx: &dyn crate::traits::FunctionContext<'b>,
+    ) -> Option<Result<formualizer_parse::parser::ReferenceType, formualizer_common::ExcelError>>
+    {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(Ok(Self::reference()))
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        _args: &'c [crate::traits::ArgumentHandle<'a, 'b>],
+        ctx: &dyn crate::traits::FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, formualizer_common::ExcelError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::traits::CalcValue::Range(ctx.resolve_range_view(
+            &Self::reference(),
+            ctx.current_sheet(),
+        )?))
+    }
+}
+
+#[test]
+fn cell_metadata_evaluates_a_reference_argument_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let wb = TestWorkbook::new().with_function(std::sync::Arc::new(CountedRef(calls.clone())));
+    let mut engine = Engine::new(wb, EvalConfig::default());
+    engine
+        .set_cell_formula(
+            "Sheet1",
+            1,
+            1,
+            parse(r#"=CELL("row",COUNTED_REF())"#).unwrap(),
+        )
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 1, parse("=CELL()").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 1),
+        Some(LiteralValue::Number(3.0))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // Without the argument validation of the default dispatch, `eval` checks
+    // the arity itself.
+    assert!(matches!(
+        engine.get_cell_value("Sheet1", 2, 1),
+        Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Value
+    ));
 }

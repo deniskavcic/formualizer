@@ -139,8 +139,9 @@ impl Function for SumFn {
         for arg in args {
             match resolve_aggregate_argument(arg, ctx)? {
                 AggregateArgument::Range(view) => {
-                    // Propagate errors from range first
-                    for res in view.errors_slices() {
+                    let core = view.core_sub_view();
+                    // Propagate errors from core first, then uniform tails
+                    for res in core.errors_slices() {
                         let (_, _, err_cols) = res?;
                         for col in err_cols {
                             if col.null_count() < col.len() {
@@ -156,11 +157,32 @@ impl Function for SumFn {
                             }
                         }
                     }
+                    let mut tail_err: Option<ExcelError> = None;
+                    view.for_each_tail_entry(|val, _| {
+                        if tail_err.is_none()
+                            && let LiteralValue::Error(e) = val
+                        {
+                            tail_err = Some(e.clone());
+                        }
+                        Ok(())
+                    })?;
+                    if let Some(e) = tail_err {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                    }
 
-                    for res in view.numbers_slices() {
+                    for res in core.numbers_slices() {
                         let (_, _, num_cols) = res?;
                         add_number_columns(&mut total, &num_cols);
                     }
+                    let date_system = view.sheet().date_system;
+                    view.for_each_tail_entry(|val, count| {
+                        if let Some(n) =
+                            crate::engine::range_view::range_numeric_value(val, date_system)
+                        {
+                            total += n * (count as f64);
+                        }
+                        Ok(())
+                    })?;
                 }
                 AggregateArgument::ReferenceError(e) => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
@@ -266,12 +288,22 @@ impl Function for CountFn {
         for arg in args {
             match resolve_aggregate_argument(arg, ctx)? {
                 AggregateArgument::Range(view) => {
-                    for res in view.numbers_slices() {
+                    let core = view.core_sub_view();
+                    for res in core.numbers_slices() {
                         let (_, _, num_cols) = res?;
                         for col in num_cols {
                             count += (col.len() - col.null_count()) as i64;
                         }
                     }
+                    let date_system = view.sheet().date_system;
+                    view.for_each_tail_entry(|val, cell_count| {
+                        if crate::engine::range_view::range_numeric_value(val, date_system)
+                            .is_some()
+                        {
+                            count += cell_count as i64;
+                        }
+                        Ok(())
+                    })?;
                 }
                 AggregateArgument::ReferenceError(e) => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
@@ -387,8 +419,9 @@ impl Function for AverageFn {
         for arg in args {
             match resolve_aggregate_argument(arg, ctx)? {
                 AggregateArgument::Range(view) => {
-                    // Propagate errors from range first
-                    for res in view.errors_slices() {
+                    let core = view.core_sub_view();
+                    // Propagate errors from core first, then uniform tails
+                    for res in core.errors_slices() {
                         let (_, _, err_cols) = res?;
                         for col in err_cols {
                             if col.null_count() < col.len() {
@@ -404,14 +437,36 @@ impl Function for AverageFn {
                             }
                         }
                     }
+                    let mut tail_err: Option<ExcelError> = None;
+                    view.for_each_tail_entry(|val, _| {
+                        if tail_err.is_none()
+                            && let LiteralValue::Error(e) = val
+                        {
+                            tail_err = Some(e.clone());
+                        }
+                        Ok(())
+                    })?;
+                    if let Some(e) = tail_err {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                    }
 
-                    for res in view.numbers_slices() {
+                    for res in core.numbers_slices() {
                         let (_, _, num_cols) = res?;
                         add_number_columns(&mut sum, &num_cols);
                         for col in num_cols {
                             cnt += (col.len() - col.null_count()) as i64;
                         }
                     }
+                    let date_system = view.sheet().date_system;
+                    view.for_each_tail_entry(|val, cell_count| {
+                        if let Some(n) =
+                            crate::engine::range_view::range_numeric_value(val, date_system)
+                        {
+                            sum += n * (cell_count as f64);
+                            cnt += cell_count as i64;
+                        }
+                        Ok(())
+                    })?;
                 }
                 AggregateArgument::ReferenceError(e) => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
@@ -527,42 +582,32 @@ impl Function for SumProductFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        use crate::broadcast::{broadcast_shape, project_index};
+        use crate::broadcast::broadcast_shape;
+        use crate::engine::range_view::{TailedOperand, combined_active_dims};
 
         if args.is_empty() {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
         }
 
-        // Helper: materialize an argument to a 2D array of LiteralValue
-        let to_array = |ah: &ArgumentHandle<'_, 'b>| -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
-            match resolve_aggregate_argument(ah, ctx)? {
+        // Keep range arguments as views (avoiding dense materialization of large sparse ranges).
+        let mut operands: Vec<TailedOperand<'b>> = Vec::with_capacity(args.len());
+        let mut shapes: Vec<(usize, usize)> = Vec::with_capacity(args.len());
+        for a in args.iter() {
+            let op = match resolve_aggregate_argument(a, ctx)? {
                 AggregateArgument::Range(rv) => {
                     if let Some(error) = rv.materialization_error() {
                         return Err(error);
                     }
-                    let mut rows: Vec<Vec<LiteralValue>> = Vec::new();
-                    rv.for_each_row(&mut |row| {
-                        rows.push(row.to_vec());
-                        Ok(())
-                    })?;
-                    Ok(rows)
+                    TailedOperand::Range(rv)
                 }
-                AggregateArgument::ReferenceError(error) => Err(error),
-                AggregateArgument::Scalar(v) => Ok(match v {
-                    LiteralValue::Array(arr) => arr,
-                    other => vec![vec![other]],
-                }),
-            }
-        };
-
-        // Collect arrays and shapes
-        let mut arrays: Vec<Vec<Vec<LiteralValue>>> = Vec::with_capacity(args.len());
-        let mut shapes: Vec<(usize, usize)> = Vec::with_capacity(args.len());
-        for a in args.iter() {
-            let arr = to_array(a)?;
-            let shape = (arr.len(), arr.first().map(|r| r.len()).unwrap_or(0));
-            arrays.push(arr);
-            shapes.push(shape);
+                AggregateArgument::ReferenceError(error) => return Err(error),
+                AggregateArgument::Scalar(v) => match v {
+                    LiteralValue::Array(arr) => TailedOperand::Array(arr),
+                    other => TailedOperand::Scalar(other),
+                },
+            };
+            shapes.push(op.dims());
+            operands.push(op);
         }
 
         // Compute broadcast target shape across all args
@@ -585,36 +630,86 @@ impl Function for SumProductFn {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(error)));
         }
 
-        // Iterate target shape, multiply coerced values across args, sum total
+        let op_refs: Vec<&TailedOperand<'b>> = operands.iter().collect();
+        let (active_rows, active_cols) = combined_active_dims(target, &op_refs);
+        let token = ctx.cancellation_token();
+        let is_cancelled = || {
+            token
+                .as_ref()
+                .is_some_and(crate::engine::CancelToken::is_cancelled)
+        };
+        let mut poll = super::super::utils::CancelPoll::new(&is_cancelled);
+
+        let factor = |lv: LiteralValue| -> Result<f64, ExcelError> {
+            match lv {
+                LiteralValue::Error(e) => Err(e),
+                other => Ok(super::super::utils::coerce_num(&other).unwrap_or(0.0)),
+            }
+        };
+
+        let tail_cols = (target.1 - active_cols) as u64;
+        let tail_rows = (target.0 - active_rows) as u64;
+
         let mut total = 0.0f64;
-        for r in 0..target.0 {
-            for c in 0..target.1 {
+        for r in 0..active_rows {
+            for c in 0..active_cols {
+                poll.advance(1)?;
                 let mut prod = 1.0f64;
-                for (arr, &shape) in arrays.iter().zip(shapes.iter()) {
-                    let (rr, cc) = project_index((r, c), shape);
-                    let lv = arr
-                        .get(rr)
-                        .and_then(|row| row.get(cc))
-                        .cloned()
-                        .unwrap_or(LiteralValue::Empty);
-                    match lv {
-                        LiteralValue::Error(e) => {
+                for op in &operands {
+                    match factor(op.get_core(r, c)) {
+                        Ok(n) => prod *= n,
+                        Err(e) => {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                         }
-                        _ => match super::super::utils::coerce_num(&lv) {
-                            Ok(n) => {
-                                prod *= n;
-                            }
-                            Err(_) => {
-                                // Non-numeric -> treated as 0 in SUMPRODUCT
-                                prod *= 0.0;
-                            }
-                        },
                     }
                 }
                 total += prod;
             }
+            if tail_cols > 0 {
+                poll.advance(1)?;
+                let mut prod = 1.0f64;
+                for op in &operands {
+                    match factor(op.get_right_tail(r)) {
+                        Ok(n) => prod *= n,
+                        Err(e) => {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                        }
+                    }
+                }
+                total += prod * (tail_cols as f64);
+            }
         }
+
+        if tail_rows > 0 {
+            for c in 0..active_cols {
+                poll.advance(1)?;
+                let mut prod = 1.0f64;
+                for op in &operands {
+                    match factor(op.get_bottom_tail(c)) {
+                        Ok(n) => prod *= n,
+                        Err(e) => {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                        }
+                    }
+                }
+                total += prod * (tail_rows as f64);
+            }
+
+            if tail_cols > 0 {
+                poll.advance(1)?;
+                let mut prod = 1.0f64;
+                for op in &operands {
+                    match factor(op.get_corner_tail()) {
+                        Ok(n) => prod *= n,
+                        Err(e) => {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                        }
+                    }
+                }
+                total += prod * ((tail_rows as f64) * (tail_cols as f64));
+            }
+        }
+
         Ok(crate::traits::CalcValue::Scalar(
             super::super::utils::aggregate_result(total),
         ))
@@ -1885,6 +1980,15 @@ impl Function for SubtotalFn {
 #[derive(Debug)]
 pub struct AggregateFn;
 
+/// Aggregates references with options for hidden rows, errors and nested totals.
+///
+/// # Remarks
+/// - Function numbers `1` through `11` select the same operations as SUBTOTAL.
+/// - Options `0` through `7` control whether to include hidden rows, errors, and nested SUBTOTAL or AGGREGATE results.
+///
+/// # Differences from Excel
+/// Excel's function numbers `12` through `19`, including the array form that takes a rank or percentile, return `#N/IMPL!` in Formualizer for otherwise valid inputs.
+///
 /// [formualizer-docgen:schema:start]
 /// Name: AGGREGATE
 /// Type: AggregateFn
@@ -1934,10 +2038,163 @@ impl Function for AggregateFn {
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
 
+        // Validate options and array-form arity before selecting an unavailable
+        // operation. An invalid call must not acquire an AGGREGATE root.
+        let options = match parse_strict_int_arg(&args[1]) {
+            Ok(v) if (0..=7).contains(&v) => v,
+            Ok(_) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new_value(),
+                )));
+            }
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        };
+        if (14..=19).contains(&function_num) && args.get(3).is_none_or(ArgumentHandle::is_omitted) {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
         let op = if (1..=11).contains(&function_num) {
             aggregate_op_from_function_num(function_num)
                 .expect("validated AGGREGATE function_num maps to operation")
         } else if (12..=19).contains(&function_num) {
+            let array_form = function_num >= 14;
+            if array_form && args.len() != 4 {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new_value(),
+                )));
+            }
+            let visibility = if options % 2 == 1 {
+                VisibilityPolicy::ExcludeManualOrFilterHidden
+            } else {
+                VisibilityPolicy::IncludeAll
+            };
+            let error_policy = if matches!(options, 2 | 3 | 6 | 7) {
+                ErrorPolicy::Ignore
+            } else {
+                ErrorPolicy::Propagate
+            };
+            let nested = if options <= 3 {
+                NestedPolicy::SkipSubtotalAndAggregate
+            } else {
+                NestedPolicy::IncludeNested
+            };
+            // Reuse established data traversal/visibility/error policies without
+            // including array-form k as another data point. No unavailable
+            // receipt may precede a propagated data error.
+            let data_args = if array_form { &args[..3] } else { args };
+            let data = match AggregateCollector::collect_args(
+                data_args,
+                2,
+                ctx,
+                AggregateOp::Sum,
+                visibility,
+                error_policy,
+                nested,
+            ) {
+                Ok(data) => data,
+                Err(error) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(error)));
+                }
+            };
+            let n = data.numeric_values.len();
+            let mut unverified = data.numeric_values.iter().any(|value| !value.is_finite());
+            // Direct text/logical/date coercion is not established by the
+            // numeric array/range domain fixtures. Preserve uncertainty rather
+            // than assert that a skipped/coerced scalar is a valid domain.
+            for arg in data_args.iter().skip(2) {
+                if matches!(
+                    arg.value()?.as_scalar(),
+                    Some(
+                        LiteralValue::Text(_)
+                            | LiteralValue::Boolean(_)
+                            | LiteralValue::Date(_)
+                            | LiteralValue::DateTime(_)
+                            | LiteralValue::Time(_)
+                            | LiteralValue::Duration(_)
+                    )
+                ) {
+                    unverified = true;
+                }
+            }
+            if array_form {
+                let raw_k = args[3].value()?.into_literal();
+                if let LiteralValue::Error(error) = raw_k {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(error)));
+                }
+                if matches!(raw_k, LiteralValue::Array(_)) {
+                    unverified = true;
+                } else {
+                    let k = match coerce_num(&raw_k) {
+                        Ok(k) if k.is_finite() => k,
+                        Ok(_) => {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                ExcelError::new_num(),
+                            )));
+                        }
+                        Err(error) => {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                error,
+                            )));
+                        }
+                    };
+                    let valid = match function_num {
+                        14 | 15 => k.trunc() >= 1.0 && k.trunc() <= n as f64,
+                        16 => (0.0..=1.0).contains(&k),
+                        17 => (0.0..=4.0).contains(&k.trunc()),
+                        18 => {
+                            k > 0.0
+                                && k < 1.0
+                                && k * (n as f64 + 1.0) >= 1.0
+                                && k * (n as f64 + 1.0) <= n as f64
+                        }
+                        19 => {
+                            (1.0..=3.0).contains(&k.trunc())
+                                && k.trunc() / 4.0 * (n as f64 + 1.0) >= 1.0
+                                && k.trunc() / 4.0 * (n as f64 + 1.0) <= n as f64
+                        }
+                        _ => unreachable!(),
+                    };
+                    // An uncertain data coercion may change n, but cannot make
+                    // a syntactically invalid percentile/quartile k valid.
+                    let independent_invalid = match function_num {
+                        14 | 15 => k.trunc() < 1.0,
+                        16 | 18 => {
+                            !(0.0..=1.0).contains(&k)
+                                || (function_num == 18 && (k == 0.0 || k == 1.0))
+                        }
+                        17 => !(0.0..=4.0).contains(&k.trunc()),
+                        19 => !(1.0..=3.0).contains(&k.trunc()),
+                        _ => false,
+                    };
+                    if independent_invalid || (!unverified && !valid) {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                            ExcelError::new_num(),
+                        )));
+                    }
+                }
+            }
+            if array_form && !unverified && n == 0 {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new_num(),
+                )));
+            }
+            if unverified {
+                ctx.report_unavailable_operation(
+                    crate::operation_diagnostics::UnavailableOperation::UnverifiedFunctionMode {
+                        name: self.name().into(),
+                        mode: "data_or_k_domain",
+                    },
+                );
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::NImpl),
+                )));
+            }
+            ctx.report_unavailable_operation(
+                crate::operation_diagnostics::UnavailableOperation::UnimplementedFunction {
+                    name: "AGGREGATE".into(),
+                },
+            );
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new(ExcelErrorKind::NImpl),
             )));
@@ -1947,18 +2204,8 @@ impl Function for AggregateFn {
             )));
         };
 
-        let options = match parse_strict_int_arg(&args[1]) {
-            Ok(v) => v,
-            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
-        };
-
         // Options 0-3 skip nested SUBTOTAL and AGGREGATE cells; 4-7 count
         // them. Odd options skip hidden rows, 2-3 and 6-7 skip errors.
-        if !(0..=7).contains(&options) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
-        }
         let visibility = if options % 2 == 1 {
             VisibilityPolicy::ExcludeManualOrFilterHidden
         } else {

@@ -36,7 +36,7 @@ fn inject_calc_pr(xlsx: &[u8], calc_pr_xml: &str) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().expect("fixture ZIP entry name").into_owned();
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             if name == "xl/workbook.xml" {
@@ -125,9 +125,10 @@ fn from_reader_iterate_on_applies_runtime_iterate_config() {
         r#"<calcPr calcId="122211" iterate="1" iterateCount="7" iterateDelta="0.01"/>"#,
     );
     let adapter = CalamineAdapter::open_bytes(bytes).unwrap();
-    // Start from the engine default (detection: Static, policy: Error) — the
-    // combo that would panic if `iterate` were applied without flipping
-    // detection. from_reader must NOT panic and must produce a valid config.
+    // Start from the engine default (detection: Runtime, policy: Error); the
+    // next test starts from Static, the combo that would panic if `iterate`
+    // were applied without flipping detection. from_reader must NOT panic and
+    // must produce a valid config.
     let wb = Workbook::from_reader(adapter, LoadStrategy::EagerAll, WorkbookConfig::ephemeral())
         .expect("from_reader must not panic on loaded iterate config");
     let cycle = wb.engine().config.cycle;

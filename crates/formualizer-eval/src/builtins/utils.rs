@@ -1,5 +1,5 @@
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
-use formualizer_common::{ExcelError, LiteralValue};
+use formualizer_common::{DateSystem, ExcelError, LiteralValue};
 use std::sync::LazyLock;
 
 /// Small epsilon used to detect near-zero denominators in trig/hyperbolic functions.
@@ -233,6 +233,44 @@ where
         }
         let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(shape.0);
         if let Ok(view) = args[0].range_view() {
+            if view.has_uniform_tail() {
+                let locale = ctx.locale();
+                let mut eval_cell = |cell: LiteralValue| -> Result<LiteralValue, ExcelError> {
+                    let num_opt = match &cell {
+                        LiteralValue::Error(e) => return Err(e.clone()),
+                        other => {
+                            crate::coercion::to_number_lenient_with_locale(other, &locale).ok()
+                        }
+                    };
+                    match num_opt {
+                        Some(n) => f(n),
+                        None => Ok(LiteralValue::Error(
+                            ExcelError::new_value()
+                                .with_message("Element is not coercible to number"),
+                        )),
+                    }
+                };
+                let active = view.active_dims();
+                let out_view = crate::engine::range_view::build_tailed_range_view(
+                    shape,
+                    active,
+                    ctx.date_system(),
+                    ctx.cancellation_token(),
+                    ctx.materialized_array_cells(),
+                    |pos| {
+                        let cell = match pos {
+                            crate::engine::range_view::TailPos::Core(r, c) => view.get_cell(r, c),
+                            crate::engine::range_view::TailPos::Right(r) => view.right_tail_cell(r),
+                            crate::engine::range_view::TailPos::Bottom(c) => {
+                                view.bottom_tail_cell(c)
+                            }
+                            crate::engine::range_view::TailPos::Corner => view.corner_tail_cell(),
+                        };
+                        eval_cell(cell)
+                    },
+                )?;
+                return Ok(crate::traits::CalcValue::Range(out_view));
+            }
             view.for_each_row(&mut |row| {
                 let mut out_row: Vec<LiteralValue> = Vec::with_capacity(row.len());
                 for cell in row.iter() {
@@ -334,6 +372,63 @@ where
         ) {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(error)));
         }
+        let has_tail = matches!(&g0, Grid::Range(rv) if rv.has_uniform_tail())
+            || matches!(&g1, Grid::Range(rv) if rv.has_uniform_tail());
+        if has_tail {
+            let op0 = match g0 {
+                Grid::Range(rv) => crate::engine::range_view::TailedOperand::Range(rv),
+                Grid::Array(arr) => crate::engine::range_view::TailedOperand::Array(arr),
+                Grid::Scalar(v) => crate::engine::range_view::TailedOperand::Scalar(v),
+            };
+            let op1 = match g1 {
+                Grid::Range(rv) => crate::engine::range_view::TailedOperand::Range(rv),
+                Grid::Array(arr) => crate::engine::range_view::TailedOperand::Array(arr),
+                Grid::Scalar(v) => crate::engine::range_view::TailedOperand::Scalar(v),
+            };
+            let active = crate::engine::range_view::combined_active_dims(target, &[&op0, &op1]);
+            let locale = ctx.locale();
+            let mut eval_pair = |lv0: LiteralValue,
+                                 lv1: LiteralValue|
+             -> Result<LiteralValue, ExcelError> {
+                let n0 = match &lv0 {
+                    LiteralValue::Error(e) => return Err(e.clone()),
+                    other => crate::coercion::to_number_lenient_with_locale(other, &locale).ok(),
+                };
+                let n1 = match &lv1 {
+                    LiteralValue::Error(e) => return Err(e.clone()),
+                    other => crate::coercion::to_number_lenient_with_locale(other, &locale).ok(),
+                };
+                match (n0, n1) {
+                    (Some(a), Some(b)) => f(a, b),
+                    _ => Ok(LiteralValue::Error(
+                        ExcelError::new_value()
+                            .with_message("Elements are not coercible to numbers"),
+                    )),
+                }
+            };
+            let out_view = crate::engine::range_view::build_tailed_range_view(
+                target,
+                active,
+                ctx.date_system(),
+                ctx.cancellation_token(),
+                ctx.materialized_array_cells(),
+                |pos| match pos {
+                    crate::engine::range_view::TailPos::Core(r, c) => {
+                        eval_pair(op0.get_core(r, c), op1.get_core(r, c))
+                    }
+                    crate::engine::range_view::TailPos::Right(r) => {
+                        eval_pair(op0.get_right_tail(r), op1.get_right_tail(r))
+                    }
+                    crate::engine::range_view::TailPos::Bottom(c) => {
+                        eval_pair(op0.get_bottom_tail(c), op1.get_bottom_tail(c))
+                    }
+                    crate::engine::range_view::TailPos::Corner => {
+                        eval_pair(op0.get_corner_tail(), op1.get_corner_tail())
+                    }
+                },
+            )?;
+            return Ok(crate::traits::CalcValue::Range(out_view));
+        }
         let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(target.0);
         for r in 0..target.0 {
             let mut out_row = Vec::with_capacity(target.1);
@@ -417,14 +512,41 @@ pub fn collapse_if_scalar(
 // ─────────────────────────────── Criteria helpers (shared by *IF* aggregators) ───────────────────────────────
 
 /// Match a value against a parsed `CriteriaPredicate` (see `crate::args::CriteriaPredicate`).
-/// Implements Excel's criteria semantics: equality is case-insensitive for text and
-/// lenient for numeric text (`5` matches the text `"5"`), but a number never matches
+/// Implements Excel's criteria semantics: equality is case-insensitive for text
+/// (as the criteria mask compares it, see `text_equality_key`) and lenient for
+/// numeric text (`5` matches the text `"5"`), but a number never matches
 /// a blank cell or a boolean; numeric comparisons only match numbers; wildcard and
 /// text comparisons only match text.
+///
+/// Date text in a cell and date values in a criterion are read in the Excel
+/// 1900 system; the engine calls [`criteria_match_for`] with the workbook's.
 pub fn criteria_match(pred: &crate::args::CriteriaPredicate, v: &LiteralValue) -> bool {
+    criteria_match_for(pred, v, DateSystem::Excel1900)
+}
+
+/// [`criteria_match`] in a workbook's date system: a text cell holding a date
+/// (`'10/26/1999`) is that date's serial in `system`, as the predicate's own
+/// date operands are when parsed with `parse_criteria_for`.
+pub(crate) fn criteria_match_for(
+    pred: &crate::args::CriteriaPredicate,
+    v: &LiteralValue,
+    system: DateSystem,
+) -> bool {
     use crate::args::CriteriaPredicate as P;
+    // A date value is its serial in `system`, as the criterion's dates are
+    // and as a sheet stores date cells.
+    let serial;
+    let v = match date_value_serial(v, system) {
+        Some(n) => {
+            serial = LiteralValue::Number(n);
+            &serial
+        }
+        None => v,
+    };
     match pred {
-        P::Eq(t) => values_equal_invariant(t, v),
+        P::Eq(t) => values_equal_invariant(t, v) || number_equals_date_text(t, v, system),
+        // Not the complement of `Eq`: Excel's `<>10/26/1999` still counts the
+        // text cell `10/26/1999`, because only `=n` reads date text (#576).
         P::Ne(t) => !values_equal_invariant(t, v),
         P::Gt(n) => criteria_number(v).is_some_and(|x| x > *n),
         P::Ge(n) => criteria_number(v).is_some_and(|x| x >= *n),
@@ -454,6 +576,66 @@ fn value_to_number(v: &LiteralValue) -> Result<f64, ExcelError> {
     crate::coercion::to_number_lenient(v)
 }
 
+/// The number an `=n` criterion sees in a text cell: numeric text (`"5"`),
+/// else date or time text (`"10/26/1999"`, `"1999-10-27"`) as its serial in
+/// `system` (`criteria_date_text_serial`). `<>n` reads numeric text only
+/// (`criteria_numeric_text`), as in Excel. The text stays text everywhere
+/// else (`ISTEXT`, `>`/`<` comparisons skip it).
+pub(crate) fn criteria_text_number(text: &str, system: DateSystem) -> Option<f64> {
+    criteria_numeric_text(text).or_else(|| crate::coercion::date_text_serial(system, text))
+}
+
+/// The serial in `system` of a text cell that holds a date or time (and is
+/// not numeric text), as an `=n` or a bare numeric criterion (`"36459"`)
+/// compares it: the date-function reading (`coercion::date_text_serial`), so
+/// `'10/26/1999` matches 36459 in a 1900 workbook and 34997 in a 1904 one.
+pub(crate) fn criteria_date_text_serial(text: &str, system: DateSystem) -> Option<f64> {
+    if criteria_numeric_text(text).is_some() {
+        return None;
+    }
+    crate::coercion::date_text_serial(system, text)
+}
+
+/// The number numeric text in a cell (`"5"`) reads as, for `=n` and `<>n`
+/// alike: the invariant-locale parse that `to_number_lenient` uses.
+pub(crate) fn criteria_numeric_text(text: &str) -> Option<f64> {
+    crate::locale::Locale::invariant().parse_number_invariant(text)
+}
+
+/// The number a bare numeric text criterion (`"36459"`, `Eq(Text)`) stands
+/// for. This is the criterion operand, not a cell, so it keeps the stricter
+/// `str::parse` that `is_numeric_text_equality` in the criteria mask has
+/// always used to decide that such a criterion is numeric.
+pub(crate) fn criteria_numeric_text_target(text: &str) -> Option<f64> {
+    text.trim().parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+/// Whether an equality criterion matches a text cell holding a date: `=n`,
+/// a number criterion, or a bare numeric text criterion (`"36459"`) matches
+/// the date text whose serial is `n`, as in Excel.
+fn number_equals_date_text(target: &LiteralValue, v: &LiteralValue, system: DateSystem) -> bool {
+    let LiteralValue::Text(cell) = v else {
+        return false;
+    };
+    let n = match target {
+        LiteralValue::Text(t) => criteria_numeric_text_target(t),
+        other => criteria_number(other),
+    };
+    let Some(n) = n else {
+        return false;
+    };
+    criteria_date_text_serial(cell, system).is_some_and(|y| (n - y).abs() < 1e-12)
+}
+
+/// The serial in `system` of a date or date-time value; `None` for anything
+/// else (times and durations do not depend on the date system).
+fn date_value_serial(v: &LiteralValue, system: DateSystem) -> Option<f64> {
+    match v {
+        LiteralValue::Date(_) | LiteralValue::DateTime(_) => v.as_serial_number_for(system),
+        _ => None,
+    }
+}
+
 /// The number a numeric comparison (`>5`) sees: numbers and dates only.
 /// Blank cells, text (even numeric text), booleans and errors never match.
 fn criteria_number(v: &LiteralValue) -> Option<f64> {
@@ -477,11 +659,13 @@ fn values_equal_invariant(a: &LiteralValue, b: &LiteralValue) -> bool {
         (LiteralValue::Number(x), LiteralValue::Number(y)) => (x - y).abs() < 1e-12,
         (LiteralValue::Int(x), LiteralValue::Int(y)) => x == y,
         (LiteralValue::Boolean(x), LiteralValue::Boolean(y)) => x == y,
-        (LiteralValue::Text(x), LiteralValue::Text(y)) => x.to_lowercase() == y.to_lowercase(),
+        (LiteralValue::Text(x), LiteralValue::Text(y)) => text_equal(x, y),
         // Treat blank and empty text as equal (Excel semantics)
         (LiteralValue::Text(x), LiteralValue::Empty) if x.is_empty() => true,
         (LiteralValue::Empty, LiteralValue::Text(y)) if y.is_empty() => true,
         (LiteralValue::Empty, LiteralValue::Empty) => true,
+        // An error criterion matches cells holding the same error.
+        (LiteralValue::Error(x), LiteralValue::Error(y)) => x.kind == y.kind,
         // Date/time/duration equality: compare by serial value.
         // This matches criteria semantics (COUNTIF(S), SUMIF(S), database criteria, etc.) where
         // date-like values participate in numeric comparisons.
@@ -504,17 +688,203 @@ fn values_equal_invariant(a: &LiteralValue, b: &LiteralValue) -> bool {
     }
 }
 
+/// How many cells of one range each equality criterion matches, from one pass
+/// over the range, so that an array of criteria does not walk it per element.
+/// `count` gives what the `COUNTIF` walk gives: a number criterion meets numbers
+/// (exactly, as the walk's numeric lane does), dates, numeric text and date
+/// text; a text criterion meets text, plain numbers, (when empty) blanks, and
+/// (when numeric, `"36459"`) date text. The tolerance of
+/// `values_equal_invariant` applies wherever the walk uses `criteria_match`.
+/// Text is keyed by `text_equality_key`, the walk's text equality.
+pub(crate) struct EqualityCounts {
+    /// Number cells. These four lanes are sorted by `sorted`.
+    numbers: Vec<f64>,
+    /// Date, time and duration cells, as serials.
+    serials: Vec<f64>,
+    /// Text cells that read as numbers.
+    numeric_text: Vec<f64>,
+    /// Text cells that hold a date or time, as serials
+    /// (`criteria_date_text_serial`), in `date_system`.
+    date_text: Vec<f64>,
+    /// The workbook's date system, in which date text is read.
+    date_system: DateSystem,
+    /// Text cells, by `text_equality_key`.
+    text: rustc_hash::FxHashMap<String, u64>,
+    trues: u64,
+    falses: u64,
+    blanks: u64,
+}
+
+impl EqualityCounts {
+    /// Counts for a range in a workbook whose date system is `date_system`.
+    pub(crate) fn new(date_system: DateSystem) -> Self {
+        Self {
+            numbers: Vec::new(),
+            serials: Vec::new(),
+            numeric_text: Vec::new(),
+            date_text: Vec::new(),
+            text: rustc_hash::FxHashMap::default(),
+            trues: 0,
+            falses: 0,
+            blanks: 0,
+            date_system,
+        }
+    }
+
+    /// Whether `count` can answer this predicate; any other takes the walk.
+    pub(crate) fn answers(pred: &crate::args::CriteriaPredicate) -> bool {
+        matches!(
+            pred,
+            crate::args::CriteriaPredicate::Eq(
+                LiteralValue::Number(_) | LiteralValue::Boolean(_) | LiteralValue::Text(_)
+            )
+        )
+    }
+
+    pub(crate) fn add(&mut self, cell: &LiteralValue) {
+        match cell {
+            LiteralValue::Number(n) => self.numbers.push(*n),
+            LiteralValue::Int(i) => self.numbers.push(*i as f64),
+            LiteralValue::Boolean(true) => self.trues += 1,
+            LiteralValue::Boolean(false) => self.falses += 1,
+            LiteralValue::Empty => self.blanks += 1,
+            LiteralValue::Text(t) => {
+                *self.text.entry(text_equality_key(t)).or_default() += 1;
+                if let Some(n) = criteria_numeric_text(t) {
+                    self.numeric_text.push(n);
+                } else if let Some(serial) = criteria_date_text_serial(t, self.date_system) {
+                    self.date_text.push(serial);
+                }
+            }
+            other => {
+                if let Some(serial) =
+                    date_value_serial(other, self.date_system).or_else(|| criteria_number(other))
+                {
+                    self.serials.push(serial);
+                }
+            }
+        }
+    }
+
+    /// Count cells that are not stored, all of them blank.
+    pub(crate) fn add_blanks(&mut self, cells: u64) {
+        self.blanks += cells;
+    }
+
+    /// Ready for `count`.
+    pub(crate) fn sorted(mut self) -> Self {
+        self.numbers.sort_unstable_by(f64::total_cmp);
+        self.serials.sort_unstable_by(f64::total_cmp);
+        self.numeric_text.sort_unstable_by(f64::total_cmp);
+        self.date_text.sort_unstable_by(f64::total_cmp);
+        self
+    }
+
+    /// The cells equal to `pred`; `None` when `answers` is false.
+    pub(crate) fn count(&self, pred: &crate::args::CriteriaPredicate) -> Option<u64> {
+        // The tolerance of `values_equal_invariant`, on a sorted lane.
+        fn within(sorted: &[f64], n: f64) -> u64 {
+            let start = sorted.partition_point(|x| x - n <= -1e-12);
+            let end = sorted.partition_point(|x| x - n < 1e-12);
+            (end - start) as u64
+        }
+        // The numeric lane's comparison: Arrow's total order on a sorted lane.
+        fn exactly(sorted: &[f64], n: f64) -> u64 {
+            let start = sorted.partition_point(|x| x.total_cmp(&n).is_lt());
+            let end = sorted.partition_point(|x| x.total_cmp(&n).is_le());
+            (end - start) as u64
+        }
+        let crate::args::CriteriaPredicate::Eq(target) = pred else {
+            return None;
+        };
+        match target {
+            LiteralValue::Number(n) => Some(
+                exactly(&self.numbers, *n)
+                    + within(&self.serials, *n)
+                    + within(&self.numeric_text, *n)
+                    + within(&self.date_text, *n),
+            ),
+            LiteralValue::Boolean(true) => Some(self.trues),
+            LiteralValue::Boolean(false) => Some(self.falses),
+            LiteralValue::Text(t) => {
+                let same_text = self.text.get(&text_equality_key(t)).copied().unwrap_or(0);
+                let blanks = if t.is_empty() { self.blanks } else { 0 };
+                let numbers = value_to_number(target).map_or(0, |n| within(&self.numbers, n));
+                let dates =
+                    criteria_numeric_text_target(t).map_or(0, |n| within(&self.date_text, n));
+                Some(same_text + blanks + numbers + dates)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Two texts are equal for a text criterion exactly when their keys are. The
+/// criteria mask (`compute_criteria_mask`) lowercases both sides and compares
+/// them with Arrow `ilike`; for non-ASCII text that is a regex, which matches
+/// character by character under Unicode simple case folding, so `ος` equals `οσ`
+/// and `k` equals the Kelvin sign. The key lowercases the same way, then puts
+/// each character as the least member of its folding class, so `criteria_match`
+/// and `EqualityCounts` compare as the mask does.
+pub(crate) fn text_equality_key(text: &str) -> String {
+    let lowered = text.to_lowercase();
+    // An ASCII letter's class starts at its capital: `S` before `s` and `ſ`.
+    if lowered.is_ascii() {
+        return lowered.to_ascii_uppercase();
+    }
+    lowered.chars().map(fold_char).collect()
+}
+
+/// A lowered character's key: the least member of its simple folding class.
+fn fold_char(ch: char) -> char {
+    use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
+    if ch.is_ascii() {
+        return ch.to_ascii_uppercase();
+    }
+    let mut class = ClassUnicode::new([ClassUnicodeRange::new(ch, ch)]);
+    // The regex folds a literal with this same call.
+    match class.try_case_fold_simple() {
+        Ok(()) => class.ranges().first().map_or(ch, |range| range.start()),
+        Err(_) => ch,
+    }
+}
+
+/// Text equality for criteria: equal keys, as the mask compares. Two ASCII
+/// texts compare as Arrow's ASCII `ilike` does; any other pair compares its
+/// lowered characters, folding only those that differ, so `k` still equals
+/// the Kelvin sign and `s` the long s. Keys map character to character, so
+/// this is `text_equality_key(a) == text_equality_key(b)` without building them.
+fn text_equal(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    let (mut a, mut b) = (a.chars(), b.chars());
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y || fold_char(x) == fold_char(y) => {}
+            _ => return false,
+        }
+    }
+}
+
 /// Wildcard criteria match text cells only: Excel never matches a number,
 /// boolean, error or blank cell against `*`, `?` or `~` patterns.
+/// Case is ignored as the mask's `ilike` ignores it (see `text_equal`), and
+/// `?` is one character, as the mask's `_` is.
 fn text_like_match(pattern: &str, case_insensitive: bool, v: &LiteralValue) -> bool {
     let s = match v {
         LiteralValue::Text(t) => t.as_str(),
         _ => return false,
     };
-    let (pat, text) = if case_insensitive {
-        (pattern.to_lowercase(), s.to_lowercase())
-    } else {
+    let (pat, text) = if !case_insensitive {
         (pattern.to_string(), s.to_string())
+    } else if pattern.is_ascii() && s.is_ascii() {
+        (pattern.to_ascii_lowercase(), s.to_ascii_lowercase())
+    } else {
+        // Keys map character to character, and `*`, `?` and `~` to themselves.
+        (text_equality_key(pattern), text_equality_key(s))
     };
 
     // Fast-path for anchored patterns without '?' or escape sequences
@@ -537,17 +907,21 @@ fn text_like_match(pattern: &str, case_insensitive: bool, v: &LiteralValue) -> b
         }
     }
 
-    // Fall back to general wildcard matching for complex patterns
-    wildcard_match(&pat, &text)
-}
-
-fn wildcard_match(pat: &str, text: &str) -> bool {
-    wildcard_match_units(pat.as_bytes(), text.as_bytes(), false)
+    // Fall back to general wildcard matching for complex patterns. ASCII bytes
+    // are characters; anything else is matched by character.
+    if pat.is_ascii() && text.is_ascii() {
+        wildcard_match_units(pat.as_bytes(), text.as_bytes(), false)
+    } else {
+        let pat: Vec<char> = pat.chars().collect();
+        let text: Vec<char> = text.chars().collect();
+        wildcard_match_units(&pat, &text, false)
+    }
 }
 
 /// Match spreadsheet wildcards without recursive branching or token allocation.
 /// `~` escapes only `*`, `?`, and `~`; other/trailing tildes remain literal.
-/// Criteria retain byte matching; SEARCH supplies characters and accepts a prefix.
+/// Criteria match bytes of ASCII text and characters otherwise; SEARCH supplies
+/// characters and accepts a prefix.
 /// Only the latest star needs a retry position: it can absorb any intervening text.
 /// Space is O(1), with at most O(pattern length * text length) matching work.
 pub(crate) fn wildcard_match_units<T: Copy + Eq + From<u8>>(

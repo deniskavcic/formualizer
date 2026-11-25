@@ -14,6 +14,12 @@ pub(in crate::xlsx::recalculate) fn cache_patches(
     value: &Cache,
     patches: &mut Vec<Patch>,
 ) {
+    if let Some(span) = cell.vm_span() {
+        patches.push(Patch {
+            span: span.clone(),
+            replacement: Vec::new(),
+        });
+    }
     let wanted = value.kind();
     let current = cell.kind.as_deref().filter(|t| *t != "n");
     if wanted != current {
@@ -74,6 +80,32 @@ pub(in crate::xlsx::recalculate) fn cache_patches(
         replacement,
     });
 }
+/// Remove a formula cache, never replace it with an empty-but-cached value.
+pub(in crate::xlsx::recalculate) fn invalidate_formula_cache(
+    cell: &sheet::FormulaMark,
+    patches: &mut Vec<Patch>,
+) -> (bool, bool) {
+    let before = patches.len();
+    for span in [
+        cell.vm_span(),
+        cell.kind_span.as_ref(),
+        cell.inline.as_ref(),
+        cell.value.as_ref().map(|v| &v.span),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        patches.push(Patch {
+            span: span.clone(),
+            replacement: Vec::new(),
+        });
+    }
+    (
+        patches.len() != before,
+        cell.value.is_some() || cell.inline.is_some(),
+    )
+}
+
 pub(in crate::xlsx) fn apply_patches(
     bytes: &[u8],
     mut patches: Vec<Patch>,

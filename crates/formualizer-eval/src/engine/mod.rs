@@ -3,12 +3,21 @@
 //! Provides incremental formula evaluation with dependency tracking.
 
 pub mod addr;
+/// Bounded relation facts for source publication policy, not all-read certification.
+#[doc(hidden)]
+pub mod affected_closure;
 pub mod arrow_ingest;
 /// The dependency authority's internals. Public only for the benchmark and
 /// probe binaries (`formualizer-bench-core`); not a stable API.
 #[doc(hidden)]
 pub mod authority;
 pub mod cancel;
+pub mod resumable;
+pub use resumable::{
+    EvaluationProgress, EvaluationStop, IncompleteEvaluation, RecalcJobError, RecalcJobOptions,
+    RecalcOutcome, SlowUnitKind, SlowUnitReport, StepDelta, StepPhase, StepProgress, StepReport,
+    StopReason,
+};
 pub(crate) mod convergence;
 pub(crate) mod derived_formats;
 pub mod effects;
@@ -29,6 +38,7 @@ pub mod lookup_index_cache;
 pub mod plan;
 #[cfg(test)]
 mod plan_legacy_tests;
+mod poison;
 pub mod range_view;
 pub(crate) mod refs;
 pub mod resource_ledger;
@@ -499,11 +509,19 @@ use formualizer_common::error::{ExcelError, ExcelErrorKind};
 use std::collections::HashMap;
 
 impl<R: EvaluationContext> Engine<R> {
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn begin_bulk_ingest(&mut self) -> ingest_builder::BulkIngestBuilder<'_> {
+        self.assert_not_poisoned();
         ingest_builder::BulkIngestBuilder::new(&mut self.graph)
     }
 
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn intern_formula_ast(&mut self, ast: &formualizer_parse::parser::ASTNode) -> AstNodeId {
+        self.assert_not_poisoned();
         self.graph.store_ast(ast)
     }
 
@@ -515,6 +533,9 @@ impl<R: EvaluationContext> Engine<R> {
     /// interned as usual. Formulas of one sheet must be staged through one
     /// grouper, in any order (only adjacent cells are compared). With
     /// `EvalConfig::formula_compression` off every formula is interned.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn stage_formula_ast(
         &mut self,
         grouper: &mut FormulaFamilyGrouper,
@@ -523,6 +544,7 @@ impl<R: EvaluationContext> Engine<R> {
         ast: &formualizer_parse::parser::ASTNode,
         formula_text: Option<std::sync::Arc<str>>,
     ) -> FormulaIngestRecord {
+        self.assert_not_poisoned();
         let (row0, col0) = (row.saturating_sub(1), col.saturating_sub(1));
         if self.config.formula_compression
             && let Some(family) = self.graph.group_formula_member(grouper, row0, col0, ast)
@@ -546,7 +568,11 @@ impl<R: EvaluationContext> Engine<R> {
     }
 
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn set_source_family_mode(&mut self, mode: SourceFamilyMode) {
+        self.assert_not_poisoned();
         self.source_family_mode = mode;
     }
 
@@ -559,7 +585,11 @@ impl<R: EvaluationContext> Engine<R> {
     /// Fold a finished sheet's staging counters into this engine's (and
     /// the process') totals, and reset them.
     #[doc(hidden)]
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn finish_family_grouper(&mut self, grouper: &mut FormulaFamilyGrouper) {
+        self.assert_not_poisoned();
         let counters = std::mem::take(&mut grouper.counters);
         counters.publish();
         self.source_family_counters.accumulate(&counters);
@@ -567,6 +597,9 @@ impl<R: EvaluationContext> Engine<R> {
 
     /// Record a formula interned without [`Self::stage_formula_ast`] (for
     /// example a parse-cache hit) as a family template candidate.
+    ///
+    /// # Panics
+    /// See [Engine::is_poisoned] for the permanent poison refusal contract.
     pub fn note_staged_formula(
         &mut self,
         grouper: &mut FormulaFamilyGrouper,
@@ -574,6 +607,7 @@ impl<R: EvaluationContext> Engine<R> {
         col: u32,
         ast_id: AstNodeId,
     ) {
+        self.assert_not_poisoned();
         let (row0, col0) = (row.saturating_sub(1), col.saturating_sub(1));
         grouper.note(
             row0,
@@ -588,7 +622,10 @@ impl<R: EvaluationContext> Engine<R> {
     }
 }
 
-/// 🔮 Scalability Hook: Performance monitoring trait for calculation observability
+/// Scalability hook reserved for calculation observability.
+/// No engine registration or invocation path currently delivers these notifications.
+/// Future delivery must catch observer panics and drop that notification without
+/// affecting values, completeness diagnostics or engine poison.
 pub trait CalcObserver: Send + Sync {
     fn on_eval_start(&self, vertex_id: VertexId);
     fn on_eval_complete(&self, vertex_id: VertexId, duration: std::time::Duration);
@@ -893,8 +930,8 @@ pub struct EvalConfig {
     pub spill: SpillConfig,
 
     /// Cycle handling configuration (detection mode + policy). Defaults to
-    /// `CycleDetection::Static` (today's stamp-every-static-SCC behavior);
-    /// `CycleDetection::Runtime` is opt-in (RFC #112).
+    /// `CycleDetection::Runtime` (RFC #112): only a live cycle gets the
+    /// policy verdict. `CycleDetection::Static` stamps every static SCC.
     pub cycle: CycleConfig,
 
     /// Use dynamic topological ordering (Pearce-Kelly algorithm).
@@ -931,6 +968,12 @@ pub struct EvalConfig {
     /// When set, the engine will compact computed overlays into base lanes when the
     /// estimated usage exceeds this cap.
     pub max_overlay_memory_bytes: Option<usize>,
+
+    /// Optional cap on retained changelog events and undo/redo history stacks.
+    ///
+    /// `None` keeps history unbounded; `Some(n)` retains at most `n` events/actions
+    /// using FIFO eviction.
+    pub max_changelog_events: Option<usize>,
 
     /// Workbook date system: Excel 1900 (default) or 1904.
     pub date_system: DateSystem,
@@ -1044,6 +1087,7 @@ impl Default for EvalConfig {
             delta_overlay_enabled: true,
             write_formula_overlay_enabled: true,
             max_overlay_memory_bytes: None,
+            max_changelog_events: None,
             date_system: DateSystem::Excel1900,
             temporal_egress: TemporalEgress::default(),
             formula_parse_policy: FormulaParsePolicy::Strict,
@@ -1109,6 +1153,12 @@ impl EvalConfig {
     #[inline]
     pub fn with_delta_overlay(mut self, enable: bool) -> Self {
         self.delta_overlay_enabled = enable;
+        self
+    }
+
+    #[inline]
+    pub fn with_max_changelog_events(mut self, max: Option<usize>) -> Self {
+        self.max_changelog_events = max;
         self
     }
 
@@ -1248,13 +1298,13 @@ impl CycleConfig {
 /// How statically-cyclic SCCs are treated at evaluation time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CycleDetection {
-    /// Today's behavior: every static SCC is stamped `#CIRC!`. Compat escape
-    /// hatch; no live-edge machinery runs.
-    #[default]
+    /// Every static SCC is stamped `#CIRC!` without being evaluated, the
+    /// default before #570. Compat switch; no live-edge machinery runs.
     Static,
     /// Static SCCs are candidates; members are evaluated with live-edge
     /// recording and only *live* cycles get the policy verdict. Phantom
     /// (live-acyclic) SCCs produce ordinary values (discussion #99).
+    #[default]
     Runtime,
 }
 

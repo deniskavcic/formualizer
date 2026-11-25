@@ -15,6 +15,14 @@ use std::sync::Arc;
 
 use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType, TableSpecifier};
 
+/// Actual provider object behind a potential function-as-value reference.
+/// Unknown name-binding metadata remains explicit; no callback is invoked.
+#[derive(Clone)]
+pub(crate) struct FunctionValueReferenceIntent {
+    pub function: Arc<dyn Function>,
+    pub binding_absent: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferenceInfo {
     /// Excel-style 1-based index of the first sheet covered by the reference.
@@ -454,6 +462,62 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         self.as_reference_or_eval().ok()
     }
 
+    /// Inspect an actual registered function reference in a higher-order value
+    /// position. Ordinary argument evaluation and errors remain unchanged.
+    pub(crate) fn function_value_reference_intent(&self) -> Option<FunctionValueReferenceIntent> {
+        self.function_value_reference_intent_using(self.interp)
+    }
+
+    fn function_value_reference_intent_using(
+        &self,
+        interp: &crate::interpreter::Interpreter<'_>,
+    ) -> Option<FunctionValueReferenceIntent> {
+        let name = match &self.expr {
+            ArgumentExpr::Ast(node) => match &node.node_type {
+                ASTNodeType::Reference {
+                    reference: ReferenceType::NamedRange(name),
+                    ..
+                } => name.as_str(),
+                _ => return None,
+            },
+            ArgumentExpr::Arena { id, data_store, .. } => {
+                let crate::engine::arena::AstNodeData::Reference { ref_type, .. } =
+                    data_store.get_node(*id)?
+                else {
+                    return None;
+                };
+                let crate::engine::arena::CompactRefType::NamedRange(name) =
+                    data_store.compact_ref(*ref_type)
+                else {
+                    return None;
+                };
+                data_store.resolve_ast_string(*name)
+            }
+        };
+        if interp.has_local_name(name) {
+            return None;
+        }
+        let presence = interp
+            .context
+            .named_binding_presence(name, interp.current_sheet());
+        if presence == Some(true) {
+            return None;
+        }
+        let function = interp.ast_function_arc("", name)?;
+        Some(FunctionValueReferenceIntent {
+            function,
+            binding_absent: presence == Some(false),
+        })
+    }
+
+    /// Metadata query for an incrementally constructed lexical environment.
+    pub(crate) fn function_value_reference_intent_in_env(
+        &self,
+        env: &crate::interpreter::LocalEnv,
+    ) -> Option<FunctionValueReferenceIntent> {
+        self.function_value_reference_intent_using(&self.interp.with_local_env(env.clone()))
+    }
+
     /// The spill rectangle of the anchor this argument names, as `ANCHORARRAY`
     /// takes it: the argument must be written as a reference (a single cell,
     /// a name, or a LET/LAMBDA local bound to one), and is resolved through
@@ -469,6 +533,27 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 .interp
                 .arena_spill_reference(*id, data_store, sheet_registry),
         }
+    }
+
+    /// `@` applied to this argument, as the unary operator does: a written
+    /// reference intersects the formula cell; anything else is evaluated once
+    /// and reduced to one value. Evaluation failures propagate, as for `@`.
+    pub(crate) fn implicit_intersection(&self) -> Result<LiteralValue, ExcelError> {
+        let written_reference = match &self.expr {
+            ArgumentExpr::Ast(node) => matches!(node.node_type, ASTNodeType::Reference { .. }),
+            ArgumentExpr::Arena { id, data_store, .. } => matches!(
+                data_store.get_node(*id),
+                Some(crate::engine::arena::AstNodeData::Reference { .. })
+            ),
+        };
+        // A LET local bound to a value is not a reference (`may_return_reference`).
+        if written_reference && self.may_return_reference() {
+            return Ok(match self.reference_for_eval() {
+                Ok(reference) => self.interp.implicit_intersection_from_reference(&reference),
+                Err(e) => LiteralValue::Error(e),
+            });
+        }
+        Ok(self.interp.eval_implicit_intersection_calc(self.value()?))
     }
 
     /// Returns whether this argument resolves as a spreadsheet reference rather than a value.
@@ -540,11 +625,57 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
     }
 
     pub fn value(&self) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        self.cached_value
+        let result = self
+            .cached_value
             .get_or_init(|| self.compute_value().map(MemoizedValue::new))
             .as_ref()
             .map(MemoizedValue::value)
-            .map_err(Clone::clone)
+            .map_err(Clone::clone);
+        if let Some(collector) = self.interp.diagnostics {
+            collector.input(&result);
+        }
+        result
+    }
+
+    /// Inspect a spreadsheet error regardless of whether evaluation returned it
+    /// as a value or as an error. Operation failures must remain failures.
+    ///
+    /// This boundary is opt-in: ordinary value consumers (including N/T) retain
+    /// their existing propagation behavior.
+    pub(crate) fn value_for_error_inspection(&self) -> Result<LiteralValue, ExcelError> {
+        fn is_spreadsheet_error(error: &ExcelError) -> bool {
+            matches!(
+                error.kind,
+                ExcelErrorKind::Null
+                    | ExcelErrorKind::Ref
+                    | ExcelErrorKind::Name
+                    | ExcelErrorKind::Value
+                    | ExcelErrorKind::Div
+                    | ExcelErrorKind::Na
+                    | ExcelErrorKind::Num
+                    | ExcelErrorKind::Error
+                    | ExcelErrorKind::NImpl
+                    | ExcelErrorKind::Spill
+                    | ExcelErrorKind::Calc
+                    | ExcelErrorKind::Circ
+            ) && matches!(
+                error.extra(),
+                formualizer_common::ExcelErrorExtra::None
+                    | formualizer_common::ExcelErrorExtra::Spill { .. }
+            )
+        }
+
+        let value = match self.value() {
+            Ok(value) => value.into_literal(),
+            Err(error) if is_spreadsheet_error(&error) => LiteralValue::Error(error),
+            Err(error) => return Err(error),
+        };
+        if let LiteralValue::Error(error) = &value
+            && !is_spreadsheet_error(error)
+        {
+            return Err(error.clone());
+        }
+        Ok(value)
     }
 
     /// Resolves a scalar that is about to be coerced to text.
@@ -581,7 +712,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 ASTNodeType::Omitted => {
                     Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)))
                 }
-                _ => self.interp.evaluate_ast(node),
+                _ => self.interp.evaluate_ast_uncached(node),
             },
             ArgumentExpr::Arena {
                 id,
@@ -595,7 +726,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                     Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)))
                 } else {
                     self.interp
-                        .evaluate_arena_ast(*id, data_store, sheet_registry)
+                        .evaluate_arena_ast_inner(*id, data_store, sheet_registry)
                 }
             }
         }
@@ -606,13 +737,13 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         env: crate::interpreter::LocalEnv,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let scoped = self.interp.with_local_env(env);
-        match &self.expr {
+        let result = match &self.expr {
             ArgumentExpr::Ast(node) => match &node.node_type {
                 ASTNodeType::Literal(v) => Ok(crate::traits::CalcValue::Scalar(v.clone())),
                 ASTNodeType::Omitted => {
                     Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)))
                 }
-                _ => scoped.evaluate_ast(node),
+                _ => scoped.evaluate_ast_uncached(node),
             },
             ArgumentExpr::Arena {
                 id,
@@ -625,10 +756,14 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 ) {
                     Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)))
                 } else {
-                    scoped.evaluate_arena_ast(*id, data_store, sheet_registry)
+                    scoped.evaluate_arena_ast_inner(*id, data_store, sheet_registry)
                 }
             }
+        };
+        if let Some(collector) = self.interp.diagnostics {
+            collector.input(&result);
         }
+        result
     }
 
     pub fn current_env(&self) -> crate::interpreter::LocalEnv {
@@ -864,7 +999,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 {
                     return None;
                 }
-                let fun = match self.interp.context.get_function("", name) {
+                let fun = match self.interp.ast_function(name) {
                     Some(fun) => fun,
                     None => {
                         return Some(Err(ExcelError::new(ExcelErrorKind::Name)
@@ -880,7 +1015,14 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                     None,
                     self.interp.current_sheet(),
                 );
-                Some(fun.resolve_reference_or_value(&handles, &ctx, &|| self.value()))
+                let _origin = self.interp.reference_diagnostic_scope();
+                Some(self.interp.diagnostic_dispatch(
+                    name,
+                    &*fun,
+                    fun.reports_known_limitations(),
+                    || fun.resolve_reference_or_value(&handles, &ctx, &|| self.value()),
+                    crate::operation_diagnostics::is_unimplemented_resolution,
+                ))
             }
             ArgumentExpr::Arena {
                 id,
@@ -906,7 +1048,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 {
                     return None;
                 }
-                let fun = match self.interp.context.get_function("", name) {
+                let fun = match self.interp.ast_function(name) {
                     Some(fun) => fun,
                     None => {
                         return Some(Err(ExcelError::new(ExcelErrorKind::Name)
@@ -932,7 +1074,14 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                     None,
                     self.interp.current_sheet(),
                 );
-                Some(fun.resolve_reference_or_value(&handles, &ctx, &|| self.value()))
+                let _origin = self.interp.reference_diagnostic_scope();
+                Some(self.interp.diagnostic_dispatch(
+                    name,
+                    &*fun,
+                    fun.reports_known_limitations(),
+                    || fun.resolve_reference_or_value(&handles, &ctx, &|| self.value()),
+                    crate::operation_diagnostics::is_unimplemented_resolution,
+                ))
             }
         }
     }
@@ -1078,10 +1227,19 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
     /// with `RETURNS_REFERENCE` first attempt reference evaluation, but fall back
     /// to their cached value when `eval_reference` returns `None`.
     pub(crate) fn resolve_once(&self) -> Result<ResolvedArgument<'b>, ExcelError> {
-        self.caches()
+        let result = self
+            .caches()
             .cached_resolved
             .get_or_init(|| self.compute_resolved_argument())
-            .clone()
+            .clone();
+        if let Some(collector) = self.interp.diagnostics {
+            match &result {
+                Ok(ResolvedArgument::Range(_)) => collector.ambiguous_input(),
+                Ok(ResolvedArgument::Value(value)) => collector.input_value(value),
+                Ok(ResolvedArgument::ReferenceError(e)) | Err(e) => collector.input_error(e),
+            }
+        }
+        result
     }
 
     /// Attaches the context's cancellation token and materialisation budget.
@@ -1160,6 +1318,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
     }
 
     pub fn range(&self) -> Result<Box<dyn Range>, ExcelError> {
+        if let Some(collector) = self.interp.diagnostics {
+            collector.ambiguous_input();
+        }
         match &self.expr {
             ArgumentExpr::Ast(node) => match &node.node_type {
                 ASTNodeType::Reference { reference, .. } => {
@@ -1204,7 +1365,8 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                     for row in rows {
                         let mut materialized_row = Vec::new();
                         for cell in row {
-                            materialized_row.push(self.interp.evaluate_ast(cell)?.into_literal());
+                            materialized_row
+                                .push(self.interp.evaluate_ast_uncached(cell)?.into_literal());
                         }
                         materialized.push(materialized_row);
                     }
@@ -1256,7 +1418,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                                     ExcelError::new(ExcelErrorKind::Value)
                                         .with_message("Invalid array")
                                 })?;
-                                let v = self.interp.evaluate_arena_ast(
+                                let v = self.interp.evaluate_arena_ast_inner(
                                     elem_id,
                                     data_store,
                                     self.sheet_registry(),
@@ -1434,7 +1596,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                             }
                             self.r = r;
                             self.c = c;
-                            match self.interp.evaluate_ast(node) {
+                            match self.interp.evaluate_ast_uncached(node) {
                                 Ok(cv) => Some(cv.into_literal()),
                                 Err(e) => Some(LiteralValue::Error(e)),
                             }
@@ -1485,7 +1647,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                             fn next(&mut self) -> Option<Self::Item> {
                                 let id = self.elements.get(self.idx).copied()?;
                                 self.idx += 1;
-                                match self.interp.evaluate_arena_ast(
+                                match self.interp.evaluate_arena_ast_inner(
                                     id,
                                     self.data_store,
                                     self.sheet_registry,
@@ -1507,9 +1669,11 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                         Ok(Box::new(it))
                     }
                     _ => {
-                        let v = self
-                            .interp
-                            .evaluate_arena_ast(*id, data_store, sheet_registry)?;
+                        let v = self.interp.evaluate_arena_ast_inner(
+                            *id,
+                            data_store,
+                            sheet_registry,
+                        )?;
                         Ok(Box::new(std::iter::once(v.into_literal())))
                     }
                 }
@@ -1962,7 +2126,13 @@ pub trait FunctionProvider: Send + Sync {
 
     #[doc(hidden)]
     fn function_capabilities(&self, ns: &str, name: &str) -> Option<crate::function::FnCaps> {
-        self.get_function(ns, name).map(|function| function.caps())
+        self.get_function(ns, name).map(|function| {
+            crate::external_callbacks::metadata(
+                function.as_ref(),
+                crate::function::FnCaps::empty,
+                || function.caps(),
+            )
+        })
     }
 
     fn function_semantic_identity(
@@ -1976,6 +2146,13 @@ pub trait FunctionProvider: Send + Sync {
 }
 
 pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
+    /// Optional request-event collector; does not certify retained-result coverage.
+    fn operation_diagnostic_collector(
+        &self,
+    ) -> Option<&crate::operation_diagnostics::OperationDiagnosticCollector> {
+        None
+    }
+
     /// Get access to the shared thread pool for parallel evaluation
     /// Returns None if parallel evaluation is disabled or unavailable
     fn thread_pool(&self) -> Option<&Arc<rayon::ThreadPool>> {
@@ -2096,6 +2273,12 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         crate::locale::Locale::invariant()
     }
 
+    /// Metadata-only binding presence in the current sheet scope. None means
+    /// the resolver cannot attest presence or absence; values are never read.
+    fn named_binding_presence(&self, _name: &str, _current_sheet: &str) -> Option<bool> {
+        None
+    }
+
     /// Number of active sheets in the workbook, if known.
     fn workbook_sheet_count(&self) -> Option<usize> {
         None
@@ -2111,6 +2294,17 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         self.sheet_index_by_name(current_sheet)
     }
 
+    /// The path the host gave the workbook for `CELL("filename")`; `None` when
+    /// its identity is unknown. See `Engine::set_workbook_path`.
+    fn workbook_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// Name of the sheet with this id, if known.
+    fn sheet_name_by_id(&self, _sheet: crate::SheetId) -> Option<&str> {
+        None
+    }
+
     /// Inspect reference metadata without materializing referenced values.
     fn inspect_reference(
         &self,
@@ -2118,6 +2312,12 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         _current_sheet: &str,
     ) -> Result<Option<ReferenceInfo>, ExcelError> {
         Ok(None)
+    }
+
+    /// Whether a concrete cell stores a formula, without requiring its text.
+    /// Existing contexts can keep supplying formula text via the fallback.
+    fn has_formula_at_cell(&self, cell: CellRef) -> Result<bool, ExcelError> {
+        self.formula_text_at_cell(cell).map(|text| text.is_some())
     }
 
     /// Retrieve formula text for a concrete cell, if that cell stores a formula.
@@ -2320,6 +2520,14 @@ pub enum VolatileLevel {
 
 /// Minimal context exposed to functions (no engine/graph APIs)
 pub trait FunctionContext<'ctx> {
+    /// Emit typed evidence on an executed unsupported path. Do not report a
+    /// propagated input error as a new operation. No effect unless enabled.
+    fn report_unavailable_operation(
+        &self,
+        _operation: crate::operation_diagnostics::UnavailableOperation,
+    ) {
+    }
+
     fn locale(&self) -> crate::locale::Locale;
     fn timezone(&self) -> &crate::timezone::TimeZoneSpec;
     fn clock(&self) -> &dyn crate::timezone::ClockProvider;
@@ -2354,11 +2562,27 @@ pub trait FunctionContext<'ctx> {
         self.sheet_index_by_name(self.current_sheet())
     }
 
+    /// See [`EvaluationContext::workbook_path`].
+    fn workbook_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// See [`EvaluationContext::sheet_name_by_id`].
+    fn sheet_name_by_id(&self, _sheet: crate::SheetId) -> Option<&str> {
+        None
+    }
+
     fn inspect_reference(
         &self,
         _reference: &ReferenceType,
     ) -> Result<Option<ReferenceInfo>, ExcelError> {
         Ok(None)
+    }
+
+    /// Whether a concrete cell stores a formula. The default preserves
+    /// contexts that provide only formula text.
+    fn has_formula_at_cell(&self, cell: CellRef) -> Result<bool, ExcelError> {
+        self.formula_text_at_cell(cell).map(|text| text.is_some())
     }
 
     fn formula_text_at_cell(&self, _cell: CellRef) -> Result<Option<String>, ExcelError> {
@@ -2472,6 +2696,15 @@ impl<'a> DefaultFunctionContext<'a> {
 }
 
 impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
+    fn report_unavailable_operation(
+        &self,
+        operation: crate::operation_diagnostics::UnavailableOperation,
+    ) {
+        if let Some(collector) = self.base.operation_diagnostic_collector() {
+            collector.record(self.current, operation);
+        }
+    }
+
     fn locale(&self) -> crate::locale::Locale {
         self.base.locale()
     }
@@ -2492,11 +2725,23 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
         self.base.current_sheet_index(self.current_sheet)
     }
 
+    fn workbook_path(&self) -> Option<&str> {
+        self.base.workbook_path()
+    }
+
+    fn sheet_name_by_id(&self, sheet: crate::SheetId) -> Option<&str> {
+        self.base.sheet_name_by_id(sheet)
+    }
+
     fn inspect_reference(
         &self,
         reference: &ReferenceType,
     ) -> Result<Option<ReferenceInfo>, ExcelError> {
         self.base.inspect_reference(reference, self.current_sheet)
+    }
+
+    fn has_formula_at_cell(&self, cell: CellRef) -> Result<bool, ExcelError> {
+        self.base.has_formula_at_cell(cell)
     }
 
     fn formula_text_at_cell(&self, cell: CellRef) -> Result<Option<String>, ExcelError> {

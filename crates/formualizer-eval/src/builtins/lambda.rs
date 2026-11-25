@@ -173,6 +173,21 @@ impl Function for LetFn {
                 Err(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
             };
 
+            // This binding is now actually being evaluated, even if the body
+            // later leaves it unused. Inspect only its current lexical env;
+            // do not inspect later bindings, invoke callbacks, or infer intent
+            // from the legacy error/value returned by value_with_env.
+            if args[pair_idx + 1]
+                .function_value_reference_intent_in_env(&env)
+                .is_some()
+            {
+                _ctx.report_unavailable_operation(
+                    crate::operation_diagnostics::UnavailableOperation::UnverifiedFunctionMode {
+                        name: self.name().into(),
+                        mode: "function_reference_binding",
+                    },
+                );
+            }
             let bound_reference = args[pair_idx + 1].bound_reference_in_env(&env);
             let bound = args[pair_idx + 1].value_with_env(env.clone())?;
             env = env.with_binding(&name, binding_from_calc_value(bound, bound_reference));
@@ -251,12 +266,16 @@ pub struct LambdaFn;
 /// - Invocation arity must exactly match the declared parameter count.
 /// - Returning an uninvoked lambda as a final cell value yields a `#CALC!` in evaluation.
 ///
+/// # Differences from Excel
+/// Excel-style immediate invocation, such as `LAMBDA(x,x+1)(1)`, returns `#N/IMPL!` in
+/// Formualizer. Bind the LAMBDA to a name with LET before invoking it.
+///
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "Inline lambda invocation"
+/// title: "Inline invocation returns an unsupported operation error"
 /// formula: "=LAMBDA(x,x+1)(41)"
-/// expected: 42
+/// expected: "#N/IMPL!"
 /// ```
 ///
 /// ```yaml,sandbox
@@ -278,7 +297,7 @@ pub struct LambdaFn;
 ///   - SUM
 /// faq:
 ///   - q: "Why does =LAMBDA(x,x+1) return #CALC! instead of a number?"
-///     a: "LAMBDA returns a callable value. In a cell result position, it must be invoked, for example =LAMBDA(x,x+1)(1)."
+///     a: "LAMBDA returns a callable value. In a cell result position, invoke a local binding such as =LET(inc,LAMBDA(x,x+1),inc(1))."
 ///   - q: "Does a LAMBDA read outer LET variables at call time or definition time?"
 ///     a: "Definition time. The closure captures its lexical environment when created."
 ///   - q: "Can I call a LAMBDA with fewer or extra arguments?"

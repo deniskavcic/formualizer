@@ -11,7 +11,6 @@ use quick_xml::{
     Reader,
     events::{BytesStart, Event},
 };
-use quick_xml_cells as quick_xml;
 use std::borrow::Cow;
 use worksheet::events::Value;
 
@@ -318,8 +317,9 @@ pub(super) fn scan(
                 col_index = 0;
             }
             Event::Start(e) if e.local_name().as_ref() == b"c" => {
-                let (r, style, kind) = get_attrs!(e, b"r" => r, b"s" => style, b"t" => kind)
-                    .map_err(|e| xml_error(quick_xml::Error::InvalidAttr(e)))?;
+                let (r, style, kind, cm) =
+                    get_attrs!(e, b"r" => r, b"s" => style, b"t" => kind, b"cm" => cm)
+                        .map_err(|e| xml_error(quick_xml::Error::InvalidAttr(e)))?;
                 let pos = if let Some(r) = r {
                     let p = coordinate(r)?;
                     col_index = p.1;
@@ -347,11 +347,71 @@ pub(super) fn scan(
                 loop {
                     match xml.read_event()? {
                         Event::Start(e) if e.local_name().as_ref() == b"f" => {
-                            let text = text(xml, e.name(), false)?;
+                            let mut text = text(xml, e.name(), false)?;
                             let (t, si, range) =
                                 get_attrs!(e, b"t" => t, b"si" => si, b"ref" => range)
                                     .map_err(|e| xml_error(quick_xml::Error::InvalidAttr(e)))?;
 
+                            // Excel saves the other cells of a volatile array formula as an empty
+                            // `<f ca="1"/>`, and some producers emit `<f t="array"/>` without `ref`
+                            // on array follower cells. None of these is a formula: keep the cell's
+                            // cached value, which the array formula then fills.
+                            if text.trim().is_empty()
+                                && (matches!(t, None | Some(b"normal"))
+                                    || (t == Some(b"array") && range.is_none()))
+                            {
+                                continue;
+                            }
+
+                            // Per ECMA-376 §18.3.1.4, `c/@cm` defaults to 0 (no cell metadata).
+                            // Non-zero or malformed `cm` indicates metadata is present or unknown.
+                            let cm_index =
+                                cm.and_then(|raw| atoi_simd::parse::<u32, true, false>(raw).ok());
+                            let has_cm = cm.is_some() && cm_index != Some(0);
+
+                            // Ordinary OOXML formulas retain scalar legacy semantics without
+                            // relying on optional calculation-chain evidence. Arrays keep
+                            // their expression and fixed/dynamic ownership separately.
+                            if t != Some(b"array")
+                                && !has_cm
+                                && let Some(lowerer) = &mut sink.lowerer
+                                && let std::borrow::Cow::Owned(rewritten) =
+                                    lowerer.evaluation_text(&text)
+                            {
+                                text = rewritten;
+                            }
+                            if t == Some(b"array") {
+                                let dynamic = cm_index
+                                    .filter(|&cm| cm > 0)
+                                    .and_then(|cm| sink.dynamic.and_then(|m| m.resolve(cm).ok()));
+                                // Unknown metadata is not evidence for a static CSE array.
+                                if !has_cm || dynamic.is_some() {
+                                    let array = match range {
+                                        Some(range) => std::str::from_utf8(range).ok().and_then(
+                                            |range_text| {
+                                                crate::legacy_formula::arrays::ArrayFormula::from_range(
+                                                    pos.0 + 1,
+                                                    pos.1 + 1,
+                                                    range_text,
+                                                    dynamic.is_some(),
+                                                )
+                                            },
+                                        ),
+                                        // Single-cell CSE formulas may omit `ref` per ECMA-376 §18.3.1.40.
+                                        None if !has_cm => Some(
+                                            crate::legacy_formula::arrays::ArrayFormula::single(
+                                                pos.0 + 1,
+                                                pos.1 + 1,
+                                                false,
+                                            ),
+                                        ),
+                                        None => None,
+                                    };
+                                    if let Some(array) = array {
+                                        sink.arrays.push(array);
+                                    }
+                                }
+                            }
                             let sequence = sink.record_count as u64;
                             let coord0 = SourceCoord {
                                 row: pos.0,
